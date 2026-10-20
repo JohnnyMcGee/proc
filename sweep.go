@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +16,9 @@ import (
 // sweep is one unattended run of `process run`: every active profile's sweepers then triage, each phase headless
 // under its profile's model and allowlist. Its output goes to a log under proc/runs. A run that fails puts every
 // watermark back as it was, so the next run reads the same window again (process stores an item it already has only
-// once), and the brief links the log. Either way, the urgent entries it queued notify.
-func sweep(root string, delta bool, now time.Time, process func(args []string, log io.Writer) error, send func(title, body string) error) error {
+// once), and the brief links the log. So does a run that hangs past runTimeout or is stopped (ctx), since a unit
+// that never finishes would hold every later run. Either way, the urgent entries it queued notify.
+func sweep(ctx context.Context, root string, delta bool, now time.Time, process func(ctx context.Context, args []string, log io.Writer) error, send func(title, body string) error) error {
 	mode, args := "full", []string{"run"}
 	if delta {
 		mode, args = "delta", append(args, "--delta")
@@ -38,16 +40,24 @@ func sweep(root string, delta bool, now time.Time, process func(args []string, l
 	if err != nil {
 		return err
 	}
-	log, err := os.Create(logPath)
+	log, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
-	runErr := process(args, log)
-	if err := log.Close(); err != nil && runErr == nil {
-		runErr = err
+	run, cancel := context.WithTimeout(ctx, runTimeout)
+	runErr := process(run, args, log)
+	if errors.Is(run.Err(), context.DeadlineExceeded) {
+		runErr = fmt.Errorf("timed out after %s", runTimeout)
 	}
+	cancel()
 	if runErr == nil {
 		runErr = phaseFailure(root)
+	}
+	if runErr != nil {
+		fmt.Fprintf(log, "proc: the %s run failed: %v\n", mode, runErr)
+	}
+	if err := log.Close(); err != nil && runErr == nil {
+		runErr = err
 	}
 	if runErr != nil {
 		runErr = fmt.Errorf("the %s run failed (%w); log: %s", mode, runErr, logPath)
@@ -61,10 +71,17 @@ func sweep(root string, delta bool, now time.Time, process func(args []string, l
 	return errors.Join(runErr, notifyUrgent(root, now, send))
 }
 
-// runProcess runs claude-skills' process CLI on the state directory proc reads, with its output in log.
-func runProcess(args []string, log io.Writer) error {
-	cmd := exec.Command("process", args...)
+// runTimeout bounds one run. A full run of every profile takes minutes; one still going after this is stuck.
+var runTimeout = time.Hour
+
+// runProcess runs claude-skills' process CLI on the state directory proc reads, with its output in log. Stopping it
+// stops its headless claude phases too.
+func runProcess(ctx context.Context, args []string, log io.Writer) error {
+	cmd := exec.CommandContext(ctx, "process", args...)
 	cmd.Stdout, cmd.Stderr = log, log
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
+	cmd.WaitDelay = time.Minute // then SIGKILL
 	return cmd.Run()
 }
 

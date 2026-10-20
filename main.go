@@ -3,10 +3,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -57,7 +60,10 @@ func command(root, name string, args []string) error {
 	case name == "notify" && len(args) == 0:
 		return notifyUrgent(root, time.Now(), notifySend)
 	case name == "sweep" && (len(args) == 0 || len(args) == 1 && args[0] == "--delta"):
-		return sweep(root, len(args) == 1, time.Now(), runProcess, notifySend)
+		// systemd stops a unit, and shutdown stops every unit, with SIGTERM: let the run fail the way it should.
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+		defer stop()
+		return sweep(ctx, root, len(args) == 1, time.Now(), runProcess, notifySend)
 	case name == "install" && len(args) == 0:
 		i, err := newInstaller()
 		if err != nil {
