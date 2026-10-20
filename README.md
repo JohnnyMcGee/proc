@@ -1,0 +1,1 @@
+proc is a Go TUI that serves as a minimalist portal to navigate my work. It is a front-end for the /brief skill from claude-skills. Its philosophy is to remove every manual process from my day, so I can just solve problems.
