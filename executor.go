@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -14,9 +15,13 @@ const defaultExecutor = "process execute"
 // startExecutor launches the executor in the background on the state directory proc showed, detached from the
 // terminal so it outlives proc, with its output in executor.log. It returns the log's path.
 func startExecutor(root string) (string, error) {
-	command := os.Getenv("PROC_EXECUTOR")
+	command := strings.TrimSpace(os.Getenv("PROC_EXECUTOR"))
 	if command == "" {
 		command = defaultExecutor
+	}
+	// sh would start either way and only log "not found", so look the program up first to say so now.
+	if _, err := exec.LookPath(strings.Fields(command)[0]); err != nil {
+		return "", err
 	}
 	logPath := filepath.Join(root, "executor.log")
 	log, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)

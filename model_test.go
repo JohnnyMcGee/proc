@@ -379,3 +379,14 @@ func TestFixtureQueueFollowsTheSharedSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestAnExecutorThatIsNotInstalledIsReportedNotStarted(t *testing.T) {
+	root := fixtureState(t)
+	t.Setenv("PROC_EXECUTOR", "proc-test-no-such-executor --run")
+	m := press(t, start(t, root), "a", "q").(*model)
+
+	if m.executorErr == nil || m.executorLog != "" {
+		t.Fatalf("want a start error and no log, got log %q, error %v", m.executorLog, m.executorErr)
+	}
+	only(t, root) // the decision is kept for the next quit
+}

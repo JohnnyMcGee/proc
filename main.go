@@ -30,7 +30,7 @@ func run() error {
 		return err
 	}
 	if m.executorErr != nil {
-		return fmt.Errorf("could not start the executor: %w", m.executorErr)
+		return fmt.Errorf("could not start the executor (%w); your decisions are saved, and quitting proc retries it", m.executorErr)
 	}
 	if m.executorLog != "" {
 		fmt.Println("proc: executor started in the background; log:", m.executorLog)
