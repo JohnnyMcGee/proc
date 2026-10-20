@@ -93,10 +93,13 @@ func (i *installer) snippetPath() string {
 }
 
 // snippet appends the counter to tmux's status line once, however often the config is sourced, and widens the
-// status line by as much so tmux does not cut the counter off.
+// status line by as much so tmux does not cut the counter off. @proc_length remembers the width it set: a config that
+// resets status-right but not its length, sourced again, must not widen it again.
 func (i *installer) snippet() string {
 	return "# proc's counter: entries waiting on me, then `!` and how many are urgent. `proc uninstall` removes it.\n" +
-		fmt.Sprintf("if -F '#{m:*proc count*,#{status-right}}' '' 'set -ag status-right \" #(%s count)\" ; set -gF status-right-length \"#{e|+:#{status-right-length},%d}\"'\n", i.exe, len(" proc 999 !99"))
+		fmt.Sprintf("if -F '#{m:*proc count*,#{status-right}}' '' 'set -ag status-right \" #(%s count)\" ; "+
+			"set -gF status-right-length \"#{?#{==:#{status-right-length},#{@proc_length}},#{status-right-length},#{e|+:#{status-right-length},%d}}\" ; "+
+			"set -gF @proc_length \"#{status-right-length}\"'\n", i.exe, len(" proc 999 !99"))
 }
 
 func (i *installer) sourceLine() string { return "source-file " + i.snippetPath() }

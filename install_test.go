@@ -4,6 +4,7 @@ import (
 	"errors"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -173,5 +174,37 @@ func TestTheServicesUseTheStateAndConfigDirectoriesMyShellDoes(t *testing.T) {
 				t.Errorf("%s lacks %q:\n%s", name, line, unit)
 			}
 		}
+	}
+}
+
+func TestReSourcingTmuxConfigKeepsOneCounterAndItsWidth(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	i, _ := setup(t)
+	// My config sets status-right but not its length, and I re-source it (bind r source-file ~/.tmux.conf).
+	write(i.home, ".tmux.conf", "set -g status-right '%H:%M'\n")
+	if err := i.install(); err != nil {
+		t.Fatal(err)
+	}
+	socket := filepath.Join(t.TempDir(), "tmux")
+	tmux := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("tmux", append([]string{"-S", socket, "-f", filepath.Join(i.home, ".tmux.conf")}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	tmux("new-session", "-d")
+	defer tmux("kill-server")
+	for range 3 {
+		tmux("source-file", filepath.Join(i.home, ".tmux.conf"))
+	}
+	if got := tmux("show", "-gv", "status-right"); got != "%H:%M #(/opt/bin/proc count)" {
+		t.Errorf("status-right = %q, want the counter once", got)
+	}
+	if got := tmux("show", "-gv", "status-right-length"); got != "53" {
+		t.Errorf("status-right-length = %s, want tmux's 40 widened once by 13", got)
 	}
 }
