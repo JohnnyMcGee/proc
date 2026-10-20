@@ -16,6 +16,14 @@ type model struct {
 	rows   []Row
 	cursor int
 	status string // one line under the list: the last thing that happened, or why a key did nothing
+	prompt *prompt
+}
+
+// prompt is the one-line reason field. Enter submits it (empty is fine), esc abandons the decision.
+type prompt struct {
+	label  string
+	text   []rune
+	submit func(reason string)
 }
 
 func newModel(root string, now func() time.Time) (*model, error) {
@@ -33,6 +41,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	if m.prompt != nil {
+		m.typeKey(key)
+		return m, nil
+	}
 	switch key.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -42,18 +54,43 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = max(m.cursor-1, 0)
 	case "a":
 		m.decide(Decision{Verdict: "approve"})
+	case "s":
+		m.ask("skip, reason (optional)", func(reason string) {
+			m.decide(Decision{Verdict: "skip", Reason: reason})
+		})
 	}
 	return m, nil
 }
 
-// decide records a decision for the row under the cursor, once: a decided entry is the executor's.
-func (m *model) decide(d Decision) {
-	row := m.current()
-	if row == nil {
+func (m *model) ask(label string, submit func(string)) {
+	if m.undecided() == nil {
 		return
 	}
-	if row.Decision != nil {
-		m.status = "already decided"
+	m.prompt = &prompt{label: label, submit: submit}
+}
+
+func (m *model) typeKey(key tea.KeyMsg) {
+	p := m.prompt
+	switch key.Type {
+	case tea.KeyEnter:
+		m.prompt = nil
+		p.submit(strings.TrimSpace(string(p.text)))
+	case tea.KeyEsc, tea.KeyCtrlC:
+		m.prompt = nil
+		m.status = "nothing recorded"
+	case tea.KeyBackspace:
+		if len(p.text) > 0 {
+			p.text = p.text[:len(p.text)-1]
+		}
+	case tea.KeyRunes, tea.KeySpace:
+		p.text = append(p.text, key.Runes...)
+	}
+}
+
+// decide records a decision for the row under the cursor.
+func (m *model) decide(d Decision) {
+	row := m.undecided()
+	if row == nil {
 		return
 	}
 	d.EntryID, d.At = row.ID, stamp(m.now())
@@ -63,6 +100,16 @@ func (m *model) decide(d Decision) {
 	}
 	row.Decision = &d
 	m.status = fmt.Sprintf("%s: %s", d.Verdict, row.Summary)
+}
+
+// undecided is the row under the cursor if it still waits on a decision. A decided entry is the executor's.
+func (m *model) undecided() *Row {
+	row := m.current()
+	if row != nil && row.Decision != nil {
+		m.status = "already decided"
+		return nil
+	}
+	return row
 }
 
 func (m *model) current() *Row {
@@ -81,6 +128,10 @@ func (m *model) View() string {
 		}
 		fmt.Fprintf(&b, "%s%s %s\n", pointer, row.Project, row.Summary)
 	}
-	b.WriteString(m.status + "\n")
+	if m.prompt != nil {
+		fmt.Fprintf(&b, "%s: %s_\n", m.prompt.label, string(m.prompt.text))
+	} else {
+		fmt.Fprintln(&b, m.status)
+	}
 	return b.String()
 }

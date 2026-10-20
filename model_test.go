@@ -36,22 +36,26 @@ func start(t *testing.T, root string) tea.Model {
 }
 
 // press sends each key to the model and runs the commands it returns, feeding their messages back, the way the
-// bubbletea runtime would. Named keys are "enter", "esc" and "backspace"; anything else is typed as runes.
+// bubbletea runtime would. Named keys are "enter", "esc" and "backspace"; anything else is typed one key at a time.
 func press(t *testing.T, m tea.Model, keys ...string) tea.Model {
 	t.Helper()
 	for _, key := range keys {
-		var msg tea.KeyMsg
 		switch key {
 		case "enter":
-			msg = tea.KeyMsg{Type: tea.KeyEnter}
+			m = deliver(m, tea.KeyMsg{Type: tea.KeyEnter})
 		case "esc":
-			msg = tea.KeyMsg{Type: tea.KeyEsc}
+			m = deliver(m, tea.KeyMsg{Type: tea.KeyEsc})
 		case "backspace":
-			msg = tea.KeyMsg{Type: tea.KeyBackspace}
+			m = deliver(m, tea.KeyMsg{Type: tea.KeyBackspace})
 		default:
-			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+			for _, r := range key {
+				if r == ' ' {
+					m = deliver(m, tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{r}})
+				} else {
+					m = deliver(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+				}
+			}
 		}
-		m = deliver(m, msg)
 	}
 	return m
 }
@@ -132,5 +136,30 @@ func assertDecision(t *testing.T, got, want map[string]any) {
 		if got[k] != v {
 			t.Errorf("decision %s = %v, want %v (decision %v)", k, got[k], v, got)
 		}
+	}
+}
+
+func TestSkipRecordsTheReasonITyped(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "s", "not mine, Lee owns cachx", "backspace", "e", "enter")
+
+	assertDecision(t, only(t, root), map[string]any{
+		"entry_id": "q-aaaaaaaaaaa2", "verdict": "skip", "reason": "not mine, Lee owns cache", "at": "2026-10-20T09:30:00Z",
+	})
+}
+
+func TestSkipWithoutAReasonRecordsNone(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "s", "enter")
+
+	assertDecision(t, only(t, root), map[string]any{"entry_id": "q-aaaaaaaaaaa2", "verdict": "skip", "at": "2026-10-20T09:30:00Z"})
+}
+
+func TestEscapeFromTheReasonPromptRecordsNothing(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "s", "nope", "esc")
+
+	if ds := decisions(t, root); len(ds) != 0 {
+		t.Fatalf("want no decision, got %v", ds)
 	}
 }
