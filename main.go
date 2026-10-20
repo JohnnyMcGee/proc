@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,7 +43,7 @@ func run() error {
 	return nil
 }
 
-const usage = "usage: proc [count | notify | sweep [--delta]]"
+const usage = "usage: proc [count | notify | sweep [--delta] | install | uninstall]"
 
 // command runs one of proc's unattended subcommands; with none, proc is the TUI.
 func command(root, name string, args []string) error {
@@ -57,6 +58,26 @@ func command(root, name string, args []string) error {
 		return notifyUrgent(root, time.Now(), notifySend)
 	case name == "sweep" && (len(args) == 0 || len(args) == 1 && args[0] == "--delta"):
 		return sweep(root, len(args) == 1, time.Now(), runProcess, notifySend)
+	case name == "install" && len(args) == 0:
+		i, err := newInstaller()
+		if err != nil {
+			return err
+		}
+		if err := i.install(); err != nil {
+			return err
+		}
+		fmt.Println("proc: sweeps run at 08:00 (full), 12:30 and 16:30 (delta), America/Chicago; logs in", filepath.Join(root, "proc", "runs"))
+		return nil
+	case name == "uninstall" && len(args) == 0:
+		i, err := newInstaller()
+		if err != nil {
+			return err
+		}
+		if err := i.uninstall(); err != nil {
+			return err
+		}
+		fmt.Println("proc: timers and counter removed; a running tmux shows the counter until it restarts")
+		return nil
 	}
 	return errors.New(usage)
 }
