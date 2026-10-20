@@ -38,8 +38,8 @@ func TestInstallAddsTimersForEachSweepAndTheCounterToTmux(t *testing.T) {
 	for file, want := range map[string][]string{
 		"proc-brief.timer":   {"OnCalendar=*-*-* 08:00:00 America/Chicago", "Persistent=true", "WantedBy=timers.target"},
 		"proc-delta.timer":   {"OnCalendar=*-*-* 12:30:00 America/Chicago", "OnCalendar=*-*-* 16:30:00 America/Chicago", "Persistent=true"},
-		"proc-brief.service": {"ExecStart=/opt/bin/proc sweep\n", `Environment="PATH=/opt/bin:/usr/bin"`},
-		"proc-delta.service": {"ExecStart=/opt/bin/proc sweep --delta\n", `Environment="PATH=/opt/bin:/usr/bin"`},
+		"proc-brief.service": {`ExecStart="/opt/bin/proc" sweep` + "\n", `Environment="PATH=/opt/bin:/usr/bin"`},
+		"proc-delta.service": {`ExecStart="/opt/bin/proc" sweep --delta` + "\n", `Environment="PATH=/opt/bin:/usr/bin"`},
 	} {
 		unit := read(t, units, file)
 		for _, line := range want {
@@ -206,5 +206,31 @@ func TestReSourcingTmuxConfigKeepsOneCounterAndItsWidth(t *testing.T) {
 	}
 	if got := tmux("show", "-gv", "status-right-length"); got != "53" {
 		t.Errorf("status-right-length = %s, want tmux's 40 widened once by 13", got)
+	}
+}
+
+func TestUnitsKeepPathsWithSpacesQuotesAndBackslashesWhole(t *testing.T) {
+	i, _ := setup(t)
+	i.exe = `/opt/my bin/proc`
+	i.path = `/opt/a"b:/opt/c\d`
+	if err := i.install(); err != nil {
+		t.Fatal(err)
+	}
+	unit := read(t, i.unitDir(), "proc-delta.service")
+	for _, line := range []string{`ExecStart="/opt/my bin/proc" sweep --delta` + "\n", `Environment="PATH=/opt/a\"b:/opt/c\\d"`} {
+		if !strings.Contains(unit, line) {
+			t.Errorf("proc-delta.service lacks %q:\n%s", line, unit)
+		}
+	}
+}
+
+func TestAValueThatWouldBreakAUnitIsRefusedBeforeAnythingIsWritten(t *testing.T) {
+	i, _ := setup(t)
+	i.env = map[string]string{"XDG_STATE_HOME": "/data\nExecStartPre=/bin/false"}
+	if err := i.install(); err == nil {
+		t.Fatal("want the newline refused")
+	}
+	if _, err := os.Stat(i.unitDir()); !os.IsNotExist(err) {
+		t.Fatalf("units were written: %v", err)
 	}
 }

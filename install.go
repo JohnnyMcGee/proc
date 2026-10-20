@@ -60,14 +60,14 @@ const sweepZone = "America/Chicago"
 var timers = []string{"proc-brief.timer", "proc-delta.timer"}
 
 func (i *installer) units() map[string]string {
-	// systemd reads % as a specifier; %% is a literal %.
-	escape := strings.NewReplacer("%", "%%").Replace
+	// Every value goes inside "...": systemd reads % as a specifier, and \ and " as quoting.
+	escape := strings.NewReplacer("%", "%%", `\`, `\\`, `"`, `\"`).Replace
 	env := fmt.Sprintf("Environment=\"PATH=%s\"\n", escape(i.path))
 	for _, name := range slices.Sorted(maps.Keys(i.env)) {
 		env += fmt.Sprintf("Environment=\"%s=%s\"\n", name, escape(i.env[name]))
 	}
 	service := func(what, args string) string {
-		return fmt.Sprintf("[Unit]\nDescription=proc: %s\n\n[Service]\nType=oneshot\n%sExecStart=%s sweep%s\n",
+		return fmt.Sprintf("[Unit]\nDescription=proc: %s\n\n[Service]\nType=oneshot\n%sExecStart=\"%s\" sweep%s\n",
 			what, env, escape(i.exe), args)
 	}
 	timer := func(what string, times ...string) string {
@@ -115,6 +115,14 @@ func (i *installer) tmuxConf() string {
 }
 
 func (i *installer) install() error {
+	// A line break would end a unit's line early and start one of its own.
+	values := map[string]string{"proc's path": i.exe, "PATH": i.path}
+	maps.Copy(values, i.env)
+	for name, value := range values {
+		if strings.ContainsAny(value, "\r\n\x00") {
+			return fmt.Errorf("%s holds a line break or NUL, which a systemd unit cannot carry", name)
+		}
+	}
 	if err := os.MkdirAll(i.unitDir(), 0o755); err != nil {
 		return err
 	}
