@@ -86,8 +86,8 @@ const shownFor = 7 * 24 * time.Hour
 // loadRows returns what is waiting on me or on the executor, and what I decided in the last week, grouped by project
 // and then by urgency.
 func loadRows(root string, now time.Time) ([]Row, error) {
-	var entries []Entry
-	if err := readJSONL(filepath.Join(root, "queue.jsonl"), &entries); err != nil {
+	entries, err := loadQueue(root)
+	if err != nil {
 		return nil, err
 	}
 	var decisions []Decision
@@ -107,18 +107,9 @@ func loadRows(root string, now time.Time) ([]Row, error) {
 		resulted[results[i].EntryID] = &results[i]
 	}
 
-	latest := map[string]int{}
-	var order []string
-	for i, e := range entries {
-		if _, seen := latest[e.ID]; !seen {
-			order = append(order, e.ID)
-		}
-		latest[e.ID] = i
-	}
 	var rows []Row
-	for _, id := range order {
-		e := entries[latest[id]]
-		row := Row{Entry: e, Decision: decided[id], Result: resulted[id]}
+	for _, e := range entries {
+		row := Row{Entry: e, Decision: decided[e.ID], Result: resulted[e.ID]}
 		if row.Decision != nil {
 			at, err := time.Parse(time.RFC3339, row.Decision.At)
 			if err == nil && now.Sub(at) < shownFor {
@@ -135,6 +126,25 @@ func loadRows(root string, now time.Time) ([]Row, error) {
 		return urgencyRank[rows[i].Urgency] < urgencyRank[rows[j].Urgency]
 	})
 	return rows, nil
+}
+
+// loadQueue returns each queue entry's current state, its last line, in the order the entries first appeared.
+func loadQueue(root string) ([]Entry, error) {
+	var lines []Entry
+	if err := readJSONL(filepath.Join(root, "queue.jsonl"), &lines); err != nil {
+		return nil, err
+	}
+	latest := map[string]int{}
+	var entries []Entry
+	for _, e := range lines {
+		if i, seen := latest[e.ID]; seen {
+			entries[i] = e
+			continue
+		}
+		latest[e.ID] = len(entries)
+		entries = append(entries, e)
+	}
+	return entries, nil
 }
 
 // loadItems reads the items a queue entry merged, for their context, from the profile's item store.
