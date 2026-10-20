@@ -26,6 +26,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	_, err = tea.NewProgram(m, tea.WithAltScreen()).Run()
-	return err
+	if _, err := tea.NewProgram(m, tea.WithAltScreen()).Run(); err != nil {
+		return err
+	}
+	if m.executorErr != nil {
+		return fmt.Errorf("could not start the executor: %w", m.executorErr)
+	}
+	if m.executorLog != "" {
+		fmt.Println("proc: executor started in the background; log:", m.executorLog)
+	}
+	return nil
 }

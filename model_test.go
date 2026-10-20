@@ -281,3 +281,75 @@ func TestDecidingFromTheEntryView(t *testing.T) {
 
 	assertDecision(t, only(t, root), map[string]any{"entry_id": "q-aaaaaaaaaaa1", "verdict": "approve", "at": "2026-10-20T09:30:00Z"})
 }
+
+// executor points PROC_EXECUTOR at a script standing in for claude-skills' executor and returns where it leaves a
+// mark when it runs.
+func executor(t *testing.T, script string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "executor")
+	mark := filepath.Join(dir, "ran")
+	body := "#!/bin/sh\n" + script + "\necho \"$XDG_STATE_HOME\" > " + mark + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PROC_EXECUTOR", path)
+	return mark
+}
+
+func waitFor(t *testing.T, path string) []byte {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			return data
+		}
+	}
+	t.Fatalf("%s never appeared", path)
+	return nil
+}
+
+func TestQuittingStartsTheExecutorAndItsResultsShowNextTime(t *testing.T) {
+	root := fixtureState(t)
+	mark := executor(t, `sleep 0.2; echo '{"entry_id": "q-aaaaaaaaaaa2", "outcome": "success", "link": "https://github.com/acme/app/pull/9#discussion_r78", "at": "2026-10-20T09:31:00Z"}' >> "$XDG_STATE_HOME/process/results.jsonl"`)
+	press(t, start(t, root), "a", "q")
+
+	if got := strings.TrimSpace(string(waitFor(t, mark))); got != filepath.Dir(root) {
+		t.Errorf("executor ran on XDG_STATE_HOME=%q, want proc's %q", got, filepath.Dir(root))
+	}
+	view := start(t, root).View()
+	if !strings.Contains(view, "✓ done https://github.com/acme/app/pull/9#discussion_r78") {
+		t.Errorf("the executor's result is not next to its entry:\n%s", view)
+	}
+}
+
+func TestQuittingWithNothingDecidedLeavesTheExecutorAlone(t *testing.T) {
+	root := fixtureState(t)
+	mark := executor(t, "")
+	press(t, start(t, root), "q")
+
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Stat(mark); err == nil {
+		t.Fatal("the executor ran with nothing to do")
+	}
+}
+
+func TestAFailedActionShowsItsError(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "j", "a")
+	result := `{"entry_id": "q-aaaaaaaaaaa1", "outcome": "failure", "error": "review already submitted", "at": "2026-10-20T09:31:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, "results.jsonl"), []byte(result), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if view := start(t, root).View(); !strings.Contains(view, "✗ failed: review already submitted") {
+		t.Errorf("the failure is not next to its entry:\n%s", view)
+	}
+}
+
+func TestASkipAloneStillStartsTheExecutorToLearnFromItsReason(t *testing.T) {
+	root := fixtureState(t)
+	mark := executor(t, "")
+	press(t, start(t, root), "s", "bot noise", "enter", "q")
+
+	waitFor(t, mark)
+}

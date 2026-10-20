@@ -13,16 +13,19 @@ import (
 )
 
 type model struct {
-	root   string
-	now    func() time.Time
-	exec   func(*exec.Cmd, tea.ExecCallback) tea.Cmd // tea.ExecProcess; tests run the editor synchronously
-	rows   []Row
-	cursor int
-	status string // one line under the list: the last thing that happened, or why a key did nothing
-	prompt *prompt
-	open   bool // showing the entry under the cursor instead of the list
-	scroll int  // first line of the entry view on screen
-	height int
+	root        string
+	now         func() time.Time
+	exec        func(*exec.Cmd, tea.ExecCallback) tea.Cmd // tea.ExecProcess; tests run the editor synchronously
+	rows        []Row
+	cursor      int
+	status      string // one line under the list: the last thing that happened, or why a key did nothing
+	prompt      *prompt
+	open        bool // showing the entry under the cursor instead of the list
+	scroll      int  // first line of the entry view on screen
+	height      int
+	decided     bool   // a decision was recorded this session
+	executorLog string // where the executor started on quit writes; empty when it did not start
+	executorErr error
 }
 
 // prompt is the one-line reason field. Enter submits it (empty is fine), esc abandons the decision.
@@ -67,6 +70,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	switch key.String() {
 	case "q", "ctrl+c":
+		m.quit()
 		return m, tea.Quit
 	case "j", "down":
 		if m.open {
@@ -96,6 +100,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.promote()
 	}
 	return m, nil
+}
+
+// quit starts the executor when it has work: decisions from this session (a skip's reason is a lesson to learn),
+// or an approved entry still without a result.
+func (m *model) quit() {
+	work := m.decided
+	for _, row := range m.rows {
+		approved := row.Status == "approved" || row.Decision != nil && row.Decision.Verdict == "approve"
+		work = work || approved && row.Result == nil
+	}
+	if !work {
+		return
+	}
+	m.executorLog, m.executorErr = startExecutor(m.root)
 }
 
 // promote approves the entry and asks the executor to make its action type silent in the profile from now on.
@@ -198,6 +216,7 @@ func (m *model) decide(d Decision) {
 		return
 	}
 	row.Decision = &d
+	m.decided = true
 	m.status = fmt.Sprintf("%s: %s", d.Verdict, row.Summary)
 }
 
