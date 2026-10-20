@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 )
@@ -55,7 +54,7 @@ func notifyUrgent(root string, now time.Time, send func(title, body string) erro
 
 // notifySend shows a desktop notification that stays until I dismiss it.
 func notifySend(title, body string) error {
-	return exec.Command("notify-send", "--urgency=critical", "--app-name=proc", title, body).Run()
+	return runCommand("notify-send", "--urgency=critical", "--app-name=proc", title, body)
 }
 
 func appendJSONL(path string, v any) error {
