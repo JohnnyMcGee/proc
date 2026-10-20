@@ -36,7 +36,7 @@ type prompt struct {
 }
 
 func newModel(root string, now func() time.Time) (*model, error) {
-	rows, err := loadRows(root)
+	rows, err := loadRows(root, now())
 	if err != nil {
 		return nil, err
 	}

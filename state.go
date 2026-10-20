@@ -80,8 +80,12 @@ func stateRoot() (string, error) {
 
 var urgencyRank = map[string]int{"urgent": 0, "normal": 1, "low": 2}
 
-// loadRows returns what is waiting on me or on the executor, grouped by project and then by urgency.
-func loadRows(root string) ([]Row, error) {
+// shownFor is how long a decided entry stays on the list, so its result can be seen.
+const shownFor = 7 * 24 * time.Hour
+
+// loadRows returns what is waiting on me or on the executor, and what I decided in the last week, grouped by project
+// and then by urgency.
+func loadRows(root string, now time.Time) ([]Row, error) {
 	var entries []Entry
 	if err := readJSONL(filepath.Join(root, "queue.jsonl"), &entries); err != nil {
 		return nil, err
@@ -115,7 +119,12 @@ func loadRows(root string) ([]Row, error) {
 	for _, id := range order {
 		e := entries[latest[id]]
 		row := Row{Entry: e, Decision: decided[id], Result: resulted[id]}
-		if row.Decision != nil || e.Status == "pending" || e.Status == "approved" {
+		if row.Decision != nil {
+			at, err := time.Parse(time.RFC3339, row.Decision.At)
+			if err == nil && now.Sub(at) < shownFor {
+				rows = append(rows, row)
+			}
+		} else if e.Status == "pending" || e.Status == "approved" {
 			rows = append(rows, row)
 		}
 	}

@@ -353,3 +353,17 @@ func TestASkipAloneStillStartsTheExecutorToLearnFromItsReason(t *testing.T) {
 
 	waitFor(t, mark)
 }
+
+func TestEntriesDecidedOverAWeekAgoLeaveTheList(t *testing.T) {
+	root := fixtureState(t)
+	old := `{"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve", "at": "2026-10-12T09:00:00Z"}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, "decisions.jsonl"), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	press(t, start(t, root), "a")
+
+	ds := decisions(t, root)
+	if len(ds) != 2 || ds[1]["entry_id"] != "q-aaaaaaaaaaa1" {
+		t.Fatalf("want the first listed entry to be q-aaaaaaaaaaa1, decisions %v", ds)
+	}
+}
