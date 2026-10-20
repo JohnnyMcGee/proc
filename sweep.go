@@ -39,6 +39,9 @@ func sweep(ctx context.Context, root string, delta bool, now time.Time, process 
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return err
 	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("the %s run was stopped before it started", mode)
+	}
 	marks, err := readWatermarks(root)
 	if err != nil {
 		return err
@@ -51,6 +54,8 @@ func sweep(ctx context.Context, root string, delta bool, now time.Time, process 
 	runErr := process(run, args, log)
 	if errors.Is(run.Err(), context.DeadlineExceeded) {
 		runErr = fmt.Errorf("timed out after %s", runTimeout)
+	} else if ctx.Err() != nil {
+		runErr = errors.New("stopped (systemctl stop or shutdown)")
 	}
 	cancel()
 	restore := map[string][]string(nil) // nil: every watermark

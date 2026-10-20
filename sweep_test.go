@@ -233,3 +233,24 @@ func TestTheLogSaysWhyARunFailed(t *testing.T) {
 		t.Fatalf("the log does not say why the run failed:\n%s", got)
 	}
 }
+
+func TestARunStoppedBeforeItStartedTouchesNothing(t *testing.T) {
+	root := fixtureState(t)
+	write(root, "brief.md", "# Brief — Tue 2026-10-20 09:30 · full\n\nNothing new.\n")
+	ctx, stop := context.WithCancel(context.Background())
+	stop() // stopped while it waited for the run before it
+	ran := false
+	process := func(ctx context.Context, args []string, log io.Writer) error {
+		ran = true
+		return ctx.Err()
+	}
+	if err := sweep(ctx, root, true, now, process, (&notifier{}).send); err == nil {
+		t.Fatal("want the stop reported")
+	}
+	if ran {
+		t.Error("a stopped run started process")
+	}
+	if brief := read(t, root, "brief.md"); strings.Contains(brief, "⚠") {
+		t.Errorf("a run that never started marked the brief failed:\n%s", brief)
+	}
+}
