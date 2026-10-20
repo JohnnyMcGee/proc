@@ -254,3 +254,27 @@ func TestARunStoppedBeforeItStartedTouchesNothing(t *testing.T) {
 		t.Errorf("a run that never started marked the brief failed:\n%s", brief)
 	}
 }
+
+func TestStoppingARunStopsEverythingItStarted(t *testing.T) {
+	bin, mark := t.TempDir(), filepath.Join(t.TempDir(), "late")
+	// A phase that ignores SIGTERM and would write after the run's watermarks were put back.
+	write(bin, "process", "#!/bin/sh\n( trap '' TERM; sleep 1; echo late > "+mark+" ) &\nsleep 30\n")
+	if err := os.Chmod(filepath.Join(bin, "process"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	ctx, stop := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer stop()
+	log, err := os.Create(filepath.Join(t.TempDir(), "run.log")) // a file, as sweep gives it: no pipe to wait on
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	if err := runProcess(ctx, []string{"run"}, log); err == nil {
+		t.Fatal("want the stopped run reported")
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(mark); !os.IsNotExist(err) {
+		t.Fatal("a phase of the stopped run kept running and wrote after it was stopped")
+	}
+}

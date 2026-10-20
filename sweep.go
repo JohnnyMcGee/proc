@@ -88,14 +88,20 @@ func sweep(ctx context.Context, root string, delta bool, now time.Time, process 
 var runTimeout = time.Hour
 
 // runProcess runs claude-skills' process CLI on the state directory proc reads, with its output in log. Stopping it
-// stops its headless claude phases too.
+// stops its headless claude phases too: SIGTERM to the whole process group, and SIGKILL to whatever is left once
+// process has exited.
 func runProcess(ctx context.Context, args []string, log io.Writer) error {
 	cmd := exec.CommandContext(ctx, "process", args...)
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
-	cmd.WaitDelay = time.Minute // then SIGKILL
-	return cmd.Run()
+	cmd.WaitDelay = time.Minute // then SIGKILL, to process alone
+	err := cmd.Run()
+	if ctx.Err() != nil && cmd.Process != nil {
+		// Whatever outlived process would write after the run's watermarks were put back.
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	return err
 }
 
 // phaseFailure reports the phases that failed although `process run` itself finished: process writes each one into
