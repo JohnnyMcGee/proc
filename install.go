@@ -174,3 +174,21 @@ func (i *installer) uninstall() error {
 	}
 	return i.run("systemctl", "--user", "daemon-reload")
 }
+
+// missing names the programs a timed run needs that the services' PATH does not hold: each run would fail on them.
+func (i *installer) missing() []string {
+	var missing []string
+	for _, name := range []string{"process", "claude", "notify-send"} {
+		found := false
+		for _, dir := range filepath.SplitList(i.path) {
+			if info, err := os.Stat(filepath.Join(dir, name)); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}

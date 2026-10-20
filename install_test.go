@@ -146,3 +146,16 @@ func TestUninstallRemovesATmuxConfigInstallCreated(t *testing.T) {
 		t.Fatalf("want no ~/.tmux.conf after uninstall, as before install; stat: %v", err)
 	}
 }
+
+func TestInstallNamesTheProgramsTheTimedRunsWillNotFind(t *testing.T) {
+	i, _ := setup(t)
+	bin := t.TempDir()
+	write(bin, "process", "#!/bin/sh\n")
+	if err := os.Chmod(filepath.Join(bin, "process"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	i.path = bin
+	if got, want := i.missing(), []string{"claude", "notify-send"}; !slices.Equal(got, want) {
+		t.Fatalf("missing = %q, want %q", got, want)
+	}
+}

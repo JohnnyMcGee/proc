@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -73,6 +74,9 @@ func command(root, name string, args []string) error {
 			return err
 		}
 		fmt.Println("proc: sweeps run at 08:00 (full), 12:30 and 16:30 (delta), America/Chicago; logs in", filepath.Join(root, "proc", "runs"))
+		if missing := i.missing(); len(missing) > 0 {
+			fmt.Printf("proc: warning: %s not on PATH, so every timed run will fail; install it, then run proc install again\n", strings.Join(missing, ", "))
+		}
 		return nil
 	case name == "uninstall" && len(args) == 0:
 		i, err := newInstaller()
