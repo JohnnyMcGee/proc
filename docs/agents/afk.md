@@ -21,7 +21,7 @@ The bootstrap is guarded (`test ! -f go.mod || …`) only because the repo start
 
 ## Pre-PR skill
 
-Run `/pre-pr` in the prepr phase, and again after any merge from `main`. It runs gofmt, `go vet`, `go test` and `go build`. Until the repo has a `go.mod`, those fail on `main` too: that is pre-existing, not the branch's fault. When CI is added, update `/pre-pr` to mirror it.
+Run `/pre-pr` in the prepr phase, and again after any merge from `main`. It runs gofmt, `go vet`, `go test` and `go build`, mirroring CI (`.github/workflows/ci.yml`). When CI changes, update `/pre-pr` to match.
 
 ## Dev server
 

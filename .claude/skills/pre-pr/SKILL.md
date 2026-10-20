@@ -5,7 +5,7 @@ description: Run proc's pre-PR checks — gofmt, go vet, go test and go build. U
 
 # Pre-PR
 
-The repo's own gate before a PR goes up: the checks CI runs, run locally so they don't bounce in CI.
+The repo's own gate before a PR goes up: the checks CI runs (`.github/workflows/ci.yml`), run locally so they don't bounce in CI.
 
 ## Steps
 
@@ -14,7 +14,7 @@ The repo's own gate before a PR goes up: the checks CI runs, run locally so they
 3. **Tests:** `go test ./...`.
 4. **Build:** `go build ./...`.
 
-Fix what each check reports and re-run it until it passes. A failure you can prove is not caused by the diff — it also fails on the base branch — is pre-existing: report it and carry on. Until the repo has a `go.mod`, steps 2–4 fail on `main` for that reason.
+Fix what each check reports and re-run it until it passes. A failure you can prove is not caused by the diff — it also fails on the base branch — is pre-existing: report it and carry on.
 
 Report plainly: each check passed, failed (with output) or skipped (with why). A failing check means the branch is not ready.
 
@@ -35,8 +35,9 @@ Then:
 
 A clean run changes nothing, and you say nothing about self-improvement.
 
-When the repo gains CI, make these steps mirror its PR jobs exactly.
+When CI's PR jobs change, change these steps to mirror them exactly.
 
 ## Changelog
 
 - 2026-10-20 — Created by /afk-setup. No CI yet; checks are the standard Go gate (gofmt, vet, test, build).
+- 2026-10-20 — The repo gained a `go.mod` and CI (`.github/workflows/ci.yml`); the steps already mirror its jobs. Dropped the no-`go.mod` caveat.
