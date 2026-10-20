@@ -42,7 +42,7 @@ func run() error {
 	return nil
 }
 
-const usage = "usage: proc [count | notify]"
+const usage = "usage: proc [count | notify | sweep [--delta]]"
 
 // command runs one of proc's unattended subcommands; with none, proc is the TUI.
 func command(root, name string, args []string) error {
@@ -55,6 +55,8 @@ func command(root, name string, args []string) error {
 		return err
 	case name == "notify" && len(args) == 0:
 		return notifyUrgent(root, time.Now(), notifySend)
+	case name == "sweep" && (len(args) == 0 || len(args) == 1 && args[0] == "--delta"):
+		return sweep(root, len(args) == 1, time.Now(), runProcess, notifySend)
 	}
 	return errors.New(usage)
 }
