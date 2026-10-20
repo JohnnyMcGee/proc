@@ -133,3 +133,16 @@ func TestInstallShowsTheCounterInARunningTmuxAndCarriesOnWithoutOne(t *testing.T
 		t.Fatalf("did not run %q; ran %q", want, *ran)
 	}
 }
+
+func TestUninstallRemovesATmuxConfigInstallCreated(t *testing.T) {
+	i, _ := setup(t)
+	if err := i.install(); err != nil {
+		t.Fatal(err)
+	}
+	if err := i.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(i.home, ".tmux.conf")); !os.IsNotExist(err) {
+		t.Fatalf("want no ~/.tmux.conf after uninstall, as before install; stat: %v", err)
+	}
+}

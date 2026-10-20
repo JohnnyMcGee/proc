@@ -78,10 +78,11 @@ func (i *installer) snippetPath() string {
 	return filepath.Join(i.configHome, "proc", "proc.tmux.conf")
 }
 
-// snippet appends the counter to tmux's status line once, however often the config is sourced.
+// snippet appends the counter to tmux's status line once, however often the config is sourced, and widens the
+// status line by as much so tmux does not cut the counter off.
 func (i *installer) snippet() string {
 	return "# proc's counter: entries waiting on me, then `!` and how many are urgent. `proc uninstall` removes it.\n" +
-		fmt.Sprintf("if -F '#{m:*proc count*,#{status-right}}' '' 'set -ag status-right \" #(%s count)\"'\n", i.exe)
+		fmt.Sprintf("if -F '#{m:*proc count*,#{status-right}}' '' 'set -ag status-right \" #(%s count)\" ; set -gF status-right-length \"#{e|+:#{status-right-length},%d}\"'\n", i.exe, len(" proc 999 !99"))
 }
 
 func (i *installer) sourceLine() string { return "source-file " + i.snippetPath() }
@@ -159,8 +160,14 @@ func (i *installer) uninstall() error {
 		}
 		lines := strings.SplitAfter(string(data), "\n")
 		kept := slices.DeleteFunc(slices.Clone(lines), func(line string) bool { return strings.TrimSpace(line) == i.sourceLine() })
-		if len(kept) != len(lines) {
-			if err := os.WriteFile(conf, []byte(strings.Join(kept, "")), 0o644); err != nil {
+		switch text := strings.Join(kept, ""); {
+		case len(kept) == len(lines):
+		case strings.TrimSpace(text) == "": // install created it
+			if err := os.Remove(conf); err != nil {
+				return err
+			}
+		default:
+			if err := os.WriteFile(conf, []byte(text), 0o644); err != nil {
 				return err
 			}
 		}
