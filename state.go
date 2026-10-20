@@ -128,6 +128,24 @@ func loadRows(root string) ([]Row, error) {
 	return rows, nil
 }
 
+// loadItems reads the items a queue entry merged, for their context, from the profile's item store.
+func loadItems(root, project string, ids []string) ([]Item, error) {
+	var all []Item
+	if err := readJSONL(filepath.Join(root, "profiles", project, "items.jsonl"), &all); err != nil {
+		return nil, err
+	}
+	var items []Item
+	for _, id := range ids {
+		for _, item := range all {
+			if item.ID == id {
+				items = append(items, item)
+				break
+			}
+		}
+	}
+	return items, nil
+}
+
 // appendDecision validates a decision against the shared schema before it reaches the decisions file.
 func appendDecision(root string, d Decision) error {
 	if err := validate("decision", d); err != nil {

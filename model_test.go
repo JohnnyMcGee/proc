@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,4 +247,37 @@ func TestADecidedEntryCannotBeDecidedAgain(t *testing.T) {
 	press(t, start(t, root), "a")
 
 	only(t, root)
+}
+
+func TestViewingAnEntryShowsItsContextAndDraft(t *testing.T) {
+	root := fixtureState(t)
+	m := press(t, start(t, root), "j")
+	if strings.Contains(m.View(), "exponential backoff") {
+		t.Fatal("the list shows context before the entry is opened")
+	}
+
+	view := press(t, m, "enter").View()
+	for _, want := range []string{
+		"Dana asks for a review of 'Retry flaky uploads'",
+		"https://github.com/acme/app/pull/12",
+		"gh_review",
+		"Looks good overall; one question on the backoff cap.",
+		"dana",
+		"Uploads now retry three times with exponential backoff, capped at 30s.",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("entry view lacks %q:\n%s", want, view)
+		}
+	}
+
+	if strings.Contains(press(t, m, "esc").View(), "exponential backoff") {
+		t.Error("esc does not go back to the list")
+	}
+}
+
+func TestDecidingFromTheEntryView(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "j", "enter", "a")
+
+	assertDecision(t, only(t, root), map[string]any{"entry_id": "q-aaaaaaaaaaa1", "verdict": "approve", "at": "2026-10-20T09:30:00Z"})
 }

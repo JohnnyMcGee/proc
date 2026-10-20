@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,9 @@ type model struct {
 	cursor int
 	status string // one line under the list: the last thing that happened, or why a key did nothing
 	prompt *prompt
+	open   bool // showing the entry under the cursor instead of the list
+	scroll int  // first line of the entry view on screen
+	height int
 }
 
 // prompt is the one-line reason field. Enter submits it (empty is fine), esc abandons the decision.
@@ -45,8 +49,12 @@ type edited struct {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if msg, ok := msg.(edited); ok {
+	switch msg := msg.(type) {
+	case edited:
 		m.afterEdit(msg)
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
 		return m, nil
 	}
 	key, ok := msg.(tea.KeyMsg)
@@ -61,9 +69,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "j", "down":
-		m.cursor = min(m.cursor+1, max(len(m.rows)-1, 0))
+		if m.open {
+			m.scroll++
+		} else {
+			m.cursor = min(m.cursor+1, max(len(m.rows)-1, 0))
+		}
 	case "k", "up":
-		m.cursor = max(m.cursor-1, 0)
+		if m.open {
+			m.scroll = max(m.scroll-1, 0)
+		} else {
+			m.cursor = max(m.cursor-1, 0)
+		}
+	case "enter":
+		m.open, m.scroll = m.current() != nil, 0
+	case "esc":
+		m.open = false
 	case "a":
 		m.decide(Decision{Verdict: "approve"})
 	case "s":
@@ -199,18 +219,116 @@ func (m *model) current() *Row {
 }
 
 func (m *model) View() string {
-	var b strings.Builder
+	var lines []string
+	if m.open {
+		lines = m.entryView(*m.current())
+	} else {
+		lines = m.listView()
+	}
+	footer := []string{"", m.status, "a approve · e edit · s skip · p approve and make silent · enter open · esc back · q quit"}
+	if m.prompt != nil {
+		footer[1] = fmt.Sprintf("%s: %s_", m.prompt.label, string(m.prompt.text))
+	}
+	if m.open && m.height > len(footer) {
+		m.scroll = min(m.scroll, max(len(lines)-(m.height-len(footer)), 0))
+		lines = lines[m.scroll:min(len(lines), m.scroll+m.height-len(footer))]
+	}
+	return strings.Join(append(lines, footer...), "\n")
+}
+
+func (m *model) listView() []string {
+	if len(m.rows) == 0 {
+		return []string{"Nothing waits on you."}
+	}
+	var lines []string
+	project := ""
 	for i, row := range m.rows {
-		pointer := "  "
+		if row.Project != project {
+			project = row.Project
+			lines = append(lines, project)
+		}
+		pointer, urgent := "  ", " "
 		if i == m.cursor {
 			pointer = "> "
 		}
-		fmt.Fprintf(&b, "%s%s %s\n", pointer, row.Project, row.Summary)
+		if row.Urgency == "urgent" {
+			urgent = "!"
+		}
+		lines = append(lines, fmt.Sprintf("%s%s %-60s  %-16s %s", pointer, urgent, row.Summary, row.Action.Type, state(row)))
 	}
-	if m.prompt != nil {
-		fmt.Fprintf(&b, "%s: %s_\n", m.prompt.label, string(m.prompt.text))
-	} else {
-		fmt.Fprintln(&b, m.status)
+	return lines
+}
+
+func (m *model) entryView(row Row) []string {
+	lines := []string{
+		row.Summary,
+		row.Link,
+		fmt.Sprintf("%s · %s · %s · %s", row.Project, row.Urgency, row.Kind, state(row)),
+		"",
+		"Action: " + row.Action.Type + params(row.Action.Params),
 	}
-	return b.String()
+	draft := row.Action.Draft
+	if row.Decision != nil && row.Decision.Draft != "" {
+		draft = row.Decision.Draft
+	}
+	if draft != "" {
+		lines = append(append(lines, "", "Draft:"), indent(draft)...)
+	}
+	items, err := loadItems(m.root, row.Project, row.ItemIDs)
+	if err != nil {
+		lines = append(lines, "", "could not read the items: "+err.Error())
+	}
+	for _, item := range items {
+		lines = append(lines, "", fmt.Sprintf("From %s: %s", item.Actor.Name, item.Summary))
+		lines = append(lines, indent(item.Context)...)
+	}
+	return lines
+}
+
+// state is where an entry stands: waiting on me, on the executor, or done.
+func state(row Row) string {
+	switch {
+	case row.Result != nil && row.Result.Outcome == "success":
+		return strings.TrimSpace("✓ done " + row.Result.Link)
+	case row.Result != nil:
+		return "✗ failed: " + row.Result.Error
+	case row.Decision != nil && row.Decision.Verdict == "skip":
+		return "skipped"
+	case row.Decision != nil:
+		s := "approved"
+		if row.Decision.Draft != "" {
+			s += ", edited"
+		}
+		if row.Decision.PromoteToSilent {
+			s += ", silent from now on"
+		}
+		return s
+	case row.Status == "approved":
+		return "approved (silent)"
+	}
+	return "pending"
+}
+
+func params(p map[string]any) string {
+	if len(p) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(p))
+	for k := range p {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var parts []string
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%v", k, p[k]))
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
+func indent(text string) []string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for i, line := range lines {
+		lines[i] = "    " + line
+	}
+	return lines
 }
