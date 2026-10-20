@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,9 @@ import (
 type installer struct {
 	home       string
 	configHome string
-	exe        string // proc's absolute path, which the units and the tmux snippet run
-	path       string // PATH for the services, so they find process, claude and notify-send as my shell does
+	exe        string            // proc's absolute path, which the units and the tmux snippet run
+	path       string            // PATH for the services, so they find process, claude and notify-send as my shell does
+	env        map[string]string // more of my shell's environment the services need: where the state and profiles are
 	run        func(name string, args ...string) error
 }
 
@@ -35,7 +37,13 @@ func newInstaller() (*installer, error) {
 	if exe, err = filepath.EvalSymlinks(exe); err != nil {
 		return nil, err
 	}
-	return &installer{home: home, configHome: configHome, exe: exe, path: os.Getenv("PATH"), run: runCommand}, nil
+	env := map[string]string{}
+	for _, name := range []string{"XDG_STATE_HOME", "XDG_CONFIG_HOME"} {
+		if value := os.Getenv(name); value != "" {
+			env[name] = value
+		}
+	}
+	return &installer{home: home, configHome: configHome, exe: exe, path: os.Getenv("PATH"), env: env, run: runCommand}, nil
 }
 
 func runCommand(name string, args ...string) error {
@@ -52,9 +60,15 @@ const sweepZone = "America/Chicago"
 var timers = []string{"proc-brief.timer", "proc-delta.timer"}
 
 func (i *installer) units() map[string]string {
+	// systemd reads % as a specifier; %% is a literal %.
+	escape := strings.NewReplacer("%", "%%").Replace
+	env := fmt.Sprintf("Environment=\"PATH=%s\"\n", escape(i.path))
+	for _, name := range slices.Sorted(maps.Keys(i.env)) {
+		env += fmt.Sprintf("Environment=\"%s=%s\"\n", name, escape(i.env[name]))
+	}
 	service := func(what, args string) string {
-		return fmt.Sprintf("[Unit]\nDescription=proc: %s\n\n[Service]\nType=oneshot\nEnvironment=\"PATH=%s\"\nExecStart=%s sweep%s\n",
-			what, i.path, i.exe, args)
+		return fmt.Sprintf("[Unit]\nDescription=proc: %s\n\n[Service]\nType=oneshot\n%sExecStart=%s sweep%s\n",
+			what, env, escape(i.exe), args)
 	}
 	timer := func(what string, times ...string) string {
 		unit := fmt.Sprintf("[Unit]\nDescription=proc: %s\n\n[Timer]\n", what)

@@ -159,3 +159,19 @@ func TestInstallNamesTheProgramsTheTimedRunsWillNotFind(t *testing.T) {
 		t.Fatalf("missing = %q, want %q", got, want)
 	}
 }
+
+func TestTheServicesUseTheStateAndConfigDirectoriesMyShellDoes(t *testing.T) {
+	i, _ := setup(t)
+	i.env = map[string]string{"XDG_STATE_HOME": "/data/state", "XDG_CONFIG_HOME": "/data/100%config"}
+	if err := i.install(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"proc-brief.service", "proc-delta.service"} {
+		unit := read(t, i.unitDir(), name)
+		for _, line := range []string{`Environment="XDG_STATE_HOME=/data/state"`, `Environment="XDG_CONFIG_HOME=/data/100%%config"`} {
+			if !strings.Contains(unit, line) {
+				t.Errorf("%s lacks %q:\n%s", name, line, unit)
+			}
+		}
+	}
+}
