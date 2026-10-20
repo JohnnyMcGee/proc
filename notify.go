@@ -13,6 +13,10 @@ type Notified struct {
 	At      string `json:"at"`
 }
 
+// interruptFor is how long an urgent entry may still interrupt me. An older one is in the brief already; without this,
+// the first run after install (or after notified.jsonl is lost) would raise one notification per urgent entry ever.
+const interruptFor = 24 * time.Hour
+
 // notifyUrgent interrupts me for urgent entries that still wait on me (to decide, or to read), once each. Triage
 // decides what is urgent (the profile's urgency rules: my manager, incident channels, deploy-blocking reviews); proc
 // only delivers it.
@@ -39,7 +43,9 @@ func notifyUrgent(root string, now time.Time, send func(title, body string) erro
 	}
 	for _, e := range entries {
 		waiting := e.Status == "pending" || e.Status == "info"
-		if e.Urgency != "urgent" || !waiting || done[e.ID] {
+		created, err := time.Parse(time.RFC3339, e.Created)
+		stale := err == nil && now.Sub(created) > interruptFor
+		if e.Urgency != "urgent" || !waiting || stale || done[e.ID] {
 			continue
 		}
 		if err := send("proc: urgent · "+e.Project, e.Summary+"\n"+e.Link); err != nil {

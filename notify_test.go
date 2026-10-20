@@ -104,3 +104,13 @@ func TestANotificationThatFailedToSendIsRetried(t *testing.T) {
 		t.Fatalf("sent %q, want the urgent entry retried once", n.sent)
 	}
 }
+
+func TestAnUrgentEntryFromBeforeYesterdayDoesNotInterrupt(t *testing.T) {
+	root := fixtureState(t)
+	requeue(t, root, "q-aaaaaaaaaaa2", func(e map[string]any) { e["created"] = "2026-10-18T08:02:00Z" })
+	n := &notifier{}
+	notifyAll(t, root, n)
+	if len(n.sent) != 0 {
+		t.Fatalf("sent %q for an entry two days old, want nothing", n.sent)
+	}
+}
