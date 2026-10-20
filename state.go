@@ -183,6 +183,8 @@ func readJSONL[T any](path string, out *[]T) error {
 	if err != nil {
 		return err
 	}
+	// Writers append whole lines; anything after the last newline is a line still being written.
+	data = data[:bytes.LastIndexByte(data, '\n')+1]
 	for n, line := range splitLines(data) {
 		var v T
 		if err := json.Unmarshal(line, &v); err != nil {

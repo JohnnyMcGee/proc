@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -22,6 +23,8 @@ type model struct {
 	prompt      *prompt
 	open        bool // showing the entry under the cursor instead of the list
 	scroll      int  // first line of the entry view on screen
+	items       []Item
+	itemsErr    error // the open entry's items, read when it opened
 	height      int
 	decided     bool   // a decision was recorded this session
 	executorLog string // where the executor started on quit writes; empty when it did not start
@@ -33,6 +36,7 @@ type prompt struct {
 	label  string
 	text   []rune
 	submit func(reason string)
+	cancel string // the status after esc
 }
 
 func newModel(root string, now func() time.Time) (*model, error) {
@@ -69,8 +73,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key.String() {
-	case "q", "ctrl+c":
+	case "q":
 		m.quit()
+		return m, tea.Quit
+	case "ctrl+c": // abort: decisions are saved, and the next q starts the executor on them
 		return m, tea.Quit
 	case "j", "down":
 		if m.open {
@@ -85,13 +91,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = max(m.cursor-1, 0)
 		}
 	case "enter":
-		m.open, m.scroll = m.current() != nil, 0
+		if row := m.current(); row != nil {
+			m.open, m.scroll = true, 0
+			m.items, m.itemsErr = loadItems(m.root, row.Project, row.ItemIDs)
+		}
 	case "esc":
 		m.open = false
 	case "a":
 		m.decide(Decision{Verdict: "approve"})
 	case "s":
-		m.ask("skip, reason (optional)", func(reason string) {
+		m.ask("skip, reason (optional)", "nothing recorded", func(reason string) {
 			m.decide(Decision{Verdict: "skip", Reason: reason})
 		})
 	case "e":
@@ -118,31 +127,41 @@ func (m *model) quit() {
 
 // promote approves the entry and asks the executor to make its action type silent in the profile from now on.
 func (m *model) promote() {
-	row := m.current()
-	if row != nil && !promotable[row.Action.Type] {
-		m.status = row.Action.Type + " always needs my approval"
+	row := m.undecided()
+	if row == nil {
+		return
+	}
+	if !promotable[row.Action.Type] {
+		m.status = row.Action.Type + " cannot be made silent"
 		return
 	}
 	m.decide(Decision{Verdict: "approve", PromoteToSilent: true})
 }
 
-// edit opens the draft in $EDITOR. The file lives in the state directory, the only place proc writes.
+// edit opens the draft in $EDITOR. The file lives in the state directory, the only place proc writes, and stays
+// there until the edit is recorded or dropped, so an edit left at the reason prompt reopens as I left it.
 func (m *model) edit() tea.Cmd {
 	row := m.undecided()
 	if row == nil {
 		return nil
 	}
-	path := filepath.Join(m.root, "proc", row.ID+".md")
+	path := m.draftPath(row.ID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		m.status = err.Error()
 		return nil
 	}
-	if err := os.WriteFile(path, []byte(row.Action.Draft+"\n"), 0o644); err != nil {
-		m.status = err.Error()
-		return nil
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.WriteFile(path, []byte(row.Action.Draft+"\n"), 0o644); err != nil {
+			m.status = err.Error()
+			return nil
+		}
 	}
 	id := row.ID
 	return m.exec(editorCommand(path), func(err error) tea.Msg { return edited{id, path, err} })
+}
+
+func (m *model) draftPath(id string) string {
+	return filepath.Join(m.root, "proc", id+".md")
 }
 
 func editorCommand(path string) *exec.Cmd {
@@ -153,37 +172,37 @@ func editorCommand(path string) *exec.Cmd {
 	return exec.Command("sh", "-c", editor+` "$1"`, "editor", path) // $EDITOR may carry flags, e.g. "code --wait"
 }
 
-// afterEdit approves the entry with the edited draft, after an optional reason. An unchanged draft or a failed
-// editor records nothing.
+// afterEdit approves the entry with the edited draft, after an optional reason. A failed editor, or a draft left
+// unchanged or emptied, records nothing.
 func (m *model) afterEdit(msg edited) {
 	data, err := os.ReadFile(msg.path)
-	os.Remove(msg.path)
+	draft := strings.TrimRight(string(data), "\n")
 	row := m.current()
 	switch {
 	case row == nil || row.ID != msg.entryID:
 		return
 	case msg.err != nil:
 		m.status = "editor failed, nothing recorded: " + msg.err.Error()
-		return
 	case err != nil:
 		m.status = err.Error()
-		return
-	}
-	draft := strings.TrimRight(string(data), "\n")
-	if draft == row.Action.Draft {
+	case draft == strings.TrimRight(row.Action.Draft, "\n"):
 		m.status = "draft unchanged, nothing recorded"
+	case strings.TrimSpace(draft) == "":
+		m.status = "draft emptied, nothing recorded; s skips the entry"
+	default:
+		m.ask("approve edited draft, reason (optional)", "nothing recorded; e reopens your edit", func(reason string) {
+			m.decide(Decision{Verdict: "approve", Draft: draft, Reason: reason})
+		})
 		return
 	}
-	m.ask("approve edited draft, reason (optional)", func(reason string) {
-		m.decide(Decision{Verdict: "approve", Draft: draft, Reason: reason})
-	})
+	os.Remove(msg.path)
 }
 
-func (m *model) ask(label string, submit func(string)) {
+func (m *model) ask(label, cancel string, submit func(string)) {
 	if m.undecided() == nil {
 		return
 	}
-	m.prompt = &prompt{label: label, submit: submit}
+	m.prompt = &prompt{label: label, submit: submit, cancel: cancel}
 }
 
 func (m *model) typeKey(key tea.KeyMsg) {
@@ -194,13 +213,18 @@ func (m *model) typeKey(key tea.KeyMsg) {
 		p.submit(strings.TrimSpace(string(p.text)))
 	case tea.KeyEsc, tea.KeyCtrlC:
 		m.prompt = nil
-		m.status = "nothing recorded"
+		m.status = p.cancel
 	case tea.KeyBackspace:
 		if len(p.text) > 0 {
 			p.text = p.text[:len(p.text)-1]
 		}
 	case tea.KeyRunes, tea.KeySpace:
-		p.text = append(p.text, key.Runes...)
+		for _, r := range key.Runes {
+			if r == '\n' || r == '\r' { // a pasted reason stays one line
+				r = ' '
+			}
+			p.text = append(p.text, r)
+		}
 	}
 }
 
@@ -217,14 +241,20 @@ func (m *model) decide(d Decision) {
 	}
 	row.Decision = &d
 	m.decided = true
+	os.Remove(m.draftPath(row.ID)) // an edit left at the reason prompt is moot now
 	m.status = fmt.Sprintf("%s: %s", d.Verdict, row.Summary)
 }
 
-// undecided is the row under the cursor if it still waits on a decision. A decided entry is the executor's.
+// undecided is the row under the cursor if it still waits on a decision. A decided entry, or one triage approved
+// silently, is the executor's.
 func (m *model) undecided() *Row {
 	row := m.current()
-	if row != nil && row.Decision != nil {
+	switch {
+	case row != nil && row.Decision != nil:
 		m.status = "already decided"
+		return nil
+	case row != nil && row.Status == "approved":
+		m.status = "already approved silently, waiting on the executor"
 		return nil
 	}
 	return row
@@ -237,29 +267,47 @@ func (m *model) current() *Row {
 	return &m.rows[m.cursor]
 }
 
+// View renders the list or the open entry, cut to the terminal's height. Everything in it that came from a service
+// is untrusted, so control characters are dropped before it reaches the terminal.
 func (m *model) View() string {
-	var lines []string
-	if m.open {
-		lines = m.entryView(*m.current())
-	} else {
-		lines = m.listView()
-	}
 	footer := []string{"", m.status, "a approve · e edit · s skip · p approve and make silent · enter open · esc back · q quit"}
 	if m.prompt != nil {
 		footer[1] = fmt.Sprintf("%s: %s_", m.prompt.label, string(m.prompt.text))
 	}
-	if m.open && m.height > len(footer) {
-		m.scroll = min(m.scroll, max(len(lines)-(m.height-len(footer)), 0))
-		lines = lines[m.scroll:min(len(lines), m.scroll+m.height-len(footer))]
+	room := m.height - len(footer)
+	var lines []string
+	if m.open {
+		lines = m.entryView(*m.current())
+		if room > 0 {
+			m.scroll = min(m.scroll, max(len(lines)-room, 0))
+		}
+	} else {
+		var cursorLine int
+		lines, cursorLine = m.listView()
+		if room > 0 {
+			m.scroll = max(cursorLine-room+1, 0)
+		}
 	}
-	return strings.Join(append(lines, footer...), "\n")
+	if room > 0 {
+		lines = lines[m.scroll:min(len(lines), m.scroll+room)]
+	}
+	return strings.Map(printable, strings.Join(append(lines, footer...), "\n"))
 }
 
-func (m *model) listView() []string {
+func printable(r rune) rune {
+	if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+		return r
+	}
+	return -1
+}
+
+// listView is the queue grouped by project, and the line the cursor is on.
+func (m *model) listView() ([]string, int) {
 	if len(m.rows) == 0 {
-		return []string{"Nothing waits on you."}
+		return []string{"Nothing waits on you."}, 0
 	}
 	var lines []string
+	cursorLine := 0
 	project := ""
 	for i, row := range m.rows {
 		if row.Project != project {
@@ -268,14 +316,15 @@ func (m *model) listView() []string {
 		}
 		pointer, urgent := "  ", " "
 		if i == m.cursor {
-			pointer = "> "
+			pointer, cursorLine = "> ", len(lines)
 		}
 		if row.Urgency == "urgent" {
 			urgent = "!"
 		}
-		lines = append(lines, fmt.Sprintf("%s%s %-60s  %-16s %s", pointer, urgent, row.Summary, row.Action.Type, state(row)))
+		summary := strings.ReplaceAll(row.Summary, "\n", " ")
+		lines = append(lines, fmt.Sprintf("%s%s %-60s  %-16s %s", pointer, urgent, summary, row.Action.Type, state(row)))
 	}
-	return lines
+	return lines, cursorLine
 }
 
 func (m *model) entryView(row Row) []string {
@@ -293,11 +342,10 @@ func (m *model) entryView(row Row) []string {
 	if draft != "" {
 		lines = append(append(lines, "", "Draft:"), indent(draft)...)
 	}
-	items, err := loadItems(m.root, row.Project, row.ItemIDs)
-	if err != nil {
-		lines = append(lines, "", "could not read the items: "+err.Error())
+	if m.itemsErr != nil {
+		lines = append(lines, "", "could not read the items: "+m.itemsErr.Error())
 	}
-	for _, item := range items {
+	for _, item := range m.items {
 		lines = append(lines, "", fmt.Sprintf("From %s: %s", item.Actor.Name, item.Summary))
 		lines = append(lines, indent(item.Context)...)
 	}

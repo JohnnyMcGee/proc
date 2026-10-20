@@ -16,12 +16,13 @@ go install .    # or put it on PATH as ~/go/bin/proc
 | `j` / `k`, arrows | move (scroll when an entry is open) |
 | `enter` / `esc` | open the entry (its draft, action and the context of every item it merged) / back to the list |
 | `a` | approve |
-| `e` | edit the draft in `$EDITOR`, then approve the edited text, with an optional one-line reason |
+| `e` | edit the draft in `$EDITOR`, then approve the edited text, with an optional one-line reason (`esc` there keeps the edit for the next `e`) |
 | `s` | skip, with an optional one-line reason |
 | `p` | approve, and make this action type silent for the project from now on |
 | `q` | quit, starting the executor in the background if there is work for it |
+| `ctrl+c` | quit without starting the executor; your decisions stay saved for its next run |
 
-A decision is final: an entry you decided is the executor's.
+A decision is final: an entry you decided, or one triage approved silently, is the executor's.
 
 ## The state directory
 
@@ -33,7 +34,7 @@ proc reads and writes only `$XDG_STATE_HOME/process/` (default `~/.local/state/p
 
 Every record follows claude-skills' `process/schema.json`, vendored unchanged as `schema/schema.json`. When it changes there, copy it over.
 
-On quit, proc runs the executor as `process execute` (claude-skills' process CLI), detached, with `XDG_STATE_HOME` set to the directory proc showed. Set `PROC_EXECUTOR` to run another command instead.
+On quit, proc runs the executor as `process execute` (claude-skills' process CLI), detached, with `XDG_STATE_HOME` set to the directory proc showed. Set `PROC_EXECUTOR` to run another program and its arguments instead. proc looks the program up before quitting, and says so if it is not installed.
 
 ## Development
 

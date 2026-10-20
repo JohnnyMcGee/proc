@@ -49,6 +49,8 @@ func press(t *testing.T, m tea.Model, keys ...string) tea.Model {
 			m = deliver(m, tea.KeyMsg{Type: tea.KeyEsc})
 		case "backspace":
 			m = deliver(m, tea.KeyMsg{Type: tea.KeyBackspace})
+		case "ctrl+c":
+			m = deliver(m, tea.KeyMsg{Type: tea.KeyCtrlC})
 		default:
 			for _, r := range key {
 				if r == ' ' {
@@ -178,7 +180,7 @@ func editor(t *testing.T, script string) {
 
 func TestEditedDraftRoundTripsIntoTheDecision(t *testing.T) {
 	root := fixtureState(t)
-	editor(t, `sed -i 's/per request/per request on purpose/' "$1"`)
+	editor(t, `sed 's/per request/per request on purpose/' "$1" > "$1.new" && mv "$1.new" "$1"`)
 	press(t, start(t, root), "e", "too terse", "enter")
 
 	assertDecision(t, only(t, root), map[string]any{
@@ -389,4 +391,148 @@ func TestAnExecutorThatIsNotInstalledIsReportedNotStarted(t *testing.T) {
 		t.Fatalf("want a start error and no log, got log %q, error %v", m.executorLog, m.executorErr)
 	}
 	only(t, root) // the decision is kept for the next quit
+}
+
+// requeue appends a new state of a fixture entry to the queue, as triage would, changed by change.
+func requeue(t *testing.T, root, id string, change func(map[string]any)) {
+	t.Helper()
+	var entries []map[string]any
+	if err := readJSONL(filepath.Join(root, "queue.jsonl"), &entries); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e["id"] == id {
+			change(e)
+			line, _ := json.Marshal(e)
+			appendTo(t, filepath.Join(root, "queue.jsonl"), string(line)+"\n")
+			return
+		}
+	}
+	t.Fatalf("no fixture entry %s", id)
+}
+
+func appendTo(t *testing.T, path, text string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func noDecisions(t *testing.T, root string) {
+	t.Helper()
+	if ds := decisions(t, root); len(ds) != 0 {
+		t.Fatalf("want no decision, got %v", ds)
+	}
+}
+
+func TestClearingTheDraftRecordsNothing(t *testing.T) {
+	root := fixtureState(t)
+	editor(t, `: > "$1"`)
+	press(t, start(t, root), "e", "enter")
+
+	noDecisions(t, root)
+}
+
+func TestAnEntryTriageApprovedSilentlyCannotBeDecided(t *testing.T) {
+	root := fixtureState(t)
+	requeue(t, root, "q-aaaaaaaaaaa2", func(e map[string]any) { e["status"] = "approved" })
+	editor(t, `echo changed > "$1"`)
+	press(t, start(t, root), "s", "enter", "a", "p", "e", "enter")
+
+	noDecisions(t, root)
+}
+
+func TestEscapingTheReasonPromptKeepsTheEditForTheNextOpen(t *testing.T) {
+	root := fixtureState(t)
+	once := filepath.Join(t.TempDir(), "edited")
+	editor(t, `[ -e `+once+` ] || { sed 's/per request/per request on purpose/' "$1" > "$1.new" && mv "$1.new" "$1" && touch `+once+`; }`)
+	press(t, start(t, root), "e", "esc", "e", "enter")
+
+	assertDecision(t, only(t, root), map[string]any{
+		"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve",
+		"draft": "It is per request on purpose so a stale entry cannot outlive a deploy.", "at": "2026-10-20T09:30:00Z",
+	})
+}
+
+func TestAHalfWrittenLastLineIsLeftForItsWriterToFinish(t *testing.T) {
+	root := fixtureState(t)
+	appendTo(t, filepath.Join(root, "queue.jsonl"), `{"id": "q-cccccccccc`)
+	appendTo(t, filepath.Join(root, "results.jsonl"), `{"entry_id": "q-aaaa`)
+	press(t, start(t, root), "a")
+
+	assertDecision(t, only(t, root), map[string]any{"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve", "at": "2026-10-20T09:30:00Z"})
+}
+
+func TestTheListScrollsToKeepTheCursorOnScreen(t *testing.T) {
+	root := fixtureState(t)
+	m := deliver(start(t, root), tea.WindowSizeMsg{Width: 100, Height: 6})
+	view := press(t, m, "j", "j").View()
+
+	if !strings.Contains(view, "> ") || !strings.Contains(view, "ENG-7") {
+		t.Errorf("the cursor's row is off screen:\n%s", view)
+	}
+	if n := strings.Count(view, "\n") + 1; n > 6 {
+		t.Errorf("view is %d lines on a 6-line terminal:\n%s", n, view)
+	}
+}
+
+func TestControlSequencesFromServicesNeverReachTheTerminal(t *testing.T) {
+	root := fixtureState(t)
+	requeue(t, root, "q-aaaaaaaaaaa2", func(e map[string]any) {
+		e["summary"] = "Lee asked\x1b]52;c;ZXZpbA==\x07 why"
+		e["action"].(map[string]any)["draft"] = "Fine.\x1b[2J\x1b[Hreally"
+	})
+	m := start(t, root)
+
+	for _, view := range []string{m.View(), press(t, m, "enter").View()} {
+		if strings.ContainsAny(view, "\x1b\x07") {
+			t.Errorf("view carries control characters: %q", view)
+		}
+	}
+}
+
+func TestADraftEndingInANewlineLeftAsIsIsUnchanged(t *testing.T) {
+	root := fixtureState(t)
+	requeue(t, root, "q-aaaaaaaaaaa2", func(e map[string]any) { e["action"].(map[string]any)["draft"] = "Sure.\n" })
+	editor(t, `true`)
+	press(t, start(t, root), "e", "enter")
+
+	noDecisions(t, root)
+}
+
+func TestAPastedReasonStaysOneLine(t *testing.T) {
+	root := fixtureState(t)
+	m := press(t, start(t, root), "s")
+	m = deliver(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("not mine\r\nLee owns it"), Paste: true})
+	press(t, m, "enter")
+
+	assertDecision(t, only(t, root), map[string]any{
+		"entry_id": "q-aaaaaaaaaaa2", "verdict": "skip", "reason": "not mine  Lee owns it", "at": "2026-10-20T09:30:00Z",
+	})
+}
+
+func TestCtrlCQuitsWithoutStartingTheExecutor(t *testing.T) {
+	root := fixtureState(t)
+	mark := executor(t, "")
+	press(t, start(t, root), "a", "ctrl+c")
+
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Stat(mark); err == nil {
+		t.Fatal("ctrl+c started the executor")
+	}
+}
+
+func TestDecidingDropsAnEditLeftAtTheReasonPrompt(t *testing.T) {
+	root := fixtureState(t)
+	editor(t, `echo changed > "$1"`)
+	press(t, start(t, root), "e", "esc", "s", "enter")
+
+	if left, _ := os.ReadDir(filepath.Join(root, "proc")); len(left) != 0 {
+		t.Errorf("draft files left in the state directory: %v", left)
+	}
 }
