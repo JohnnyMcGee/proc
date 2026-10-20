@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -78,19 +79,50 @@ func TestAFailedRunLeavesWatermarksUnchangedAndTheBriefLinksItsLog(t *testing.T)
 	}
 }
 
-func TestARunWithAFailedPhaseLeavesWatermarksUnchanged(t *testing.T) {
+func TestAFailedSweepPhaseLeavesItsWatermarkUnchanged(t *testing.T) {
 	root := fixtureState(t)
-	write(root, "profiles/acme/watermarks.json", acmeMarks)
-	p := &fakeProcess{root: root, brief: "# Brief — Tue 2026-10-20 09:30 · full\n\n## acme\n\n> ⚠ sweep-linear failed: MCP server not connected\nNothing new.\n"}
+	write(root, "profiles/acme/watermarks.json", `{"github": "2026-10-19T16:30:00Z", "linear": "2026-10-19T16:30:00Z"}`)
+	p := &fakeProcess{root: root, brief: "# Brief — Tue 2026-10-20 09:30 · full\n\n## acme\n\n> ⚠ sweep-linear failed: MCP server not connected\nNothing new.\n\n## beta\n\nNothing new.\n"}
 	if err := sweep(context.Background(), root, false, now, p.run, (&notifier{}).send); err == nil {
 		t.Fatal("want the failed phase reported")
 	}
-	if got := read(t, root, "profiles/acme/watermarks.json"); got != acmeMarks {
-		t.Fatalf("acme watermarks = %s, want them as before the run: %s", got, acmeMarks)
+	marks := watermarks(t, root, "acme")
+	if marks["linear"] != "2026-10-19T16:30:00Z" {
+		t.Errorf("acme's linear watermark = %q, want it as before the run", marks["linear"])
+	}
+	if marks["github"] != "2026-10-20T09:30:00Z" {
+		t.Errorf("acme's github watermark = %q, want the run's: its sweep did not fail", marks["github"])
+	}
+	if got := watermarks(t, root, "beta")["linear"]; got != "2026-10-20T09:30:00Z" {
+		t.Errorf("beta's linear watermark = %q, want the run's: beta had no problem", got)
 	}
 	if brief := read(t, root, "brief.md"); !regexp.MustCompile(`/\S+\.log`).MatchString(brief) {
 		t.Fatalf("the brief links no log:\n%s", brief)
 	}
+}
+
+func TestAProblemOutsideSweepingLetsWatermarksMoveButLinksTheLog(t *testing.T) {
+	root := fixtureState(t)
+	write(root, "profiles/acme/watermarks.json", acmeMarks)
+	p := &fakeProcess{root: root, brief: "# Brief — Tue 2026-10-20 09:30 · full\n\n## acme\n\n> ⚠ acme has no [phases.execute]; 1 approved entr(ies) wait\nNothing new.\n"}
+	if err := sweep(context.Background(), root, false, now, p.run, (&notifier{}).send); err == nil {
+		t.Fatal("want the problem reported")
+	}
+	if got := watermarks(t, root, "acme")["github"]; got != "2026-10-20T09:30:00Z" {
+		t.Errorf("acme's github watermark = %q, want the run's: re-reading the window cannot fix an executor problem", got)
+	}
+	if brief := read(t, root, "brief.md"); !regexp.MustCompile(`/\S+\.log`).MatchString(brief) {
+		t.Fatalf("the brief links no log:\n%s", brief)
+	}
+}
+
+func watermarks(t *testing.T, root, profile string) map[string]string {
+	t.Helper()
+	marks := map[string]string{}
+	if err := json.Unmarshal([]byte(read(t, root, "profiles/"+profile+"/watermarks.json")), &marks); err != nil {
+		t.Fatal(err)
+	}
+	return marks
 }
 
 func TestACleanRunKeepsItsWatermarksAndNotifiesWhatItQueued(t *testing.T) {
