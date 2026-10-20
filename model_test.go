@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -222,4 +223,27 @@ func TestSubmittingAReviewCannotBePromotedToSilent(t *testing.T) {
 	if ds := decisions(t, root); len(ds) != 0 {
 		t.Fatalf("want no decision, got %v", ds)
 	}
+}
+
+func TestQueueIsListedByProjectThenUrgencyWithoutFYIOrSupersededEntries(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "a", "j", "s", "enter", "j", "j", "j", "j", "a")
+
+	ds := decisions(t, root)
+	var got []string
+	for _, d := range ds {
+		got = append(got, d["entry_id"].(string))
+	}
+	want := []string{"q-aaaaaaaaaaa2", "q-aaaaaaaaaaa1", "q-bbbbbbbbbbb1"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("decided %v, want %v", got, want)
+	}
+}
+
+func TestADecidedEntryCannotBeDecidedAgain(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "a", "s", "enter", "p")
+	press(t, start(t, root), "a")
+
+	only(t, root)
 }
