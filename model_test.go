@@ -367,3 +367,15 @@ func TestEntriesDecidedOverAWeekAgoLeaveTheList(t *testing.T) {
 		t.Fatalf("want the first listed entry to be q-aaaaaaaaaaa1, decisions %v", ds)
 	}
 }
+
+func TestFixtureQueueFollowsTheSharedSchema(t *testing.T) {
+	var entries []map[string]any
+	if err := readJSONL("testdata/state/process/queue.jsonl", &entries); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if err := validate("queue_entry", e); err != nil {
+			t.Errorf("%s: %v", e["id"], err)
+		}
+	}
+}
