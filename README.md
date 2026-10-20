@@ -24,13 +24,27 @@ go install .    # or put it on PATH as ~/go/bin/proc
 
 A decision is final: an entry you decided, or one triage approved silently, is the executor's.
 
+## Running without me
+
+```bash
+proc install      # timers + tmux counter; run it again after moving proc or changing PATH
+proc uninstall    # removes both; safe to run twice
+```
+
+`proc install` writes systemd user timers to `~/.config/systemd/user/` and enables them. They run claude-skills' `process run` through `proc sweep`: a full sweep at 08:00, and delta sweeps (`--delta`) at 12:30 and 16:30, America/Chicago. Each phase runs as headless Claude under the model and tool allowlist its profile sets. The timers are persistent, so a run missed while the machine was off fires when it comes back. The services get the `PATH` of the shell that ran `proc install`, so they find `process`, `claude` and `notify-send` the way it did. User timers run while the user's systemd manager runs, which on a desktop means while I'm logged in (`loginctl enable-linger` keeps them running without a login).
+
+- **`proc sweep [--delta]`** is one run. It writes the run's output to `proc/runs/<time>-<full|delta>.log`. Runs wait for each other, so the boot-time catch-up never runs two at once. A run is failed when `process run` fails, or when it finishes with a failed phase (a `⚠` line in the brief). Then proc puts every profile's watermarks back as they were before the run, so the next run reads the same window again, and adds a `⚠` line under the brief's title with the path of the log. Watch it with `systemctl --user status proc-brief proc-delta` and `journalctl --user -u proc-brief`.
+- **`proc notify`**, run after every sweep, sends `notify-send` for each urgent entry still waiting on me (pending, or FYI), once per entry. Sent entries are recorded in `proc/notified.jsonl`, and a send that fails is retried next time. Triage decides what is urgent from the profile's `[urgency]` rules (my manager, incident channels, deploy-blocking reviews); proc only delivers it.
+- **`proc count`** prints the counter: `proc 3 !1` is 3 entries waiting on a decision, 1 of them urgent. It prints nothing when nothing waits. `proc install` adds it to tmux's `status-right` through `~/.config/proc/proc.tmux.conf`, sourced from your tmux config. For a shell prompt, put `$(proc count)` in `PS1`.
+
 ## The state directory
 
-proc reads and writes only `$XDG_STATE_HOME/process/` (default `~/.local/state/process/`), which claude-skills' process pipeline owns. It holds no credentials and calls no service API.
+Apart from what `proc install` puts in place, proc reads and writes only `$XDG_STATE_HOME/process/` (default `~/.local/state/process/`), which claude-skills' process pipeline owns. It holds no credentials and calls no service API: `proc sweep` leaves that to `process run`.
 
 - reads `queue.jsonl` (triage's queue entries; the last line per id wins), `profiles/<project>/items.jsonl` (the context of each entry's items) and `results.jsonl` (the executor's outcome per entry);
 - appends `decisions.jsonl`, one decision per entry, each validated against the shared schema first;
-- writes a draft under `proc/` while `$EDITOR` has it open, and the executor's output to `executor.log`.
+- writes a draft under `proc/` while `$EDITOR` has it open, and the executor's output to `executor.log`;
+- `proc sweep` `process run`, restores `profiles/<project>/watermarks.json` after a failed run, writes run logs under `proc/runs/` and adds a line to `brief.md` when a run fails; `proc notify` records what it sent in `proc/notified.jsonl`.
 
 Every record follows claude-skills' `process/schema.json`, vendored unchanged as `schema/schema.json`. When it changes there, copy it over.
 
