@@ -44,7 +44,7 @@ Apart from what `proc install` puts in place, proc reads and writes only `$XDG_S
 - reads `queue.jsonl` (triage's queue entries; the last line per id wins), `profiles/<project>/items.jsonl` (the context of each entry's items) and `results.jsonl` (the executor's outcome per entry);
 - appends `decisions.jsonl`, one decision per entry, each validated against the shared schema first;
 - writes a draft under `proc/` while `$EDITOR` has it open, and the executor's output to `executor.log`;
-- `proc sweep` `process run`, restores `profiles/<project>/watermarks.json` after a failed run, writes run logs under `proc/runs/` and adds a line to `brief.md` when a run fails; `proc notify` records what it sent in `proc/notified.jsonl`.
+- `proc sweep` restores `profiles/<project>/watermarks.json` after a failed run, writes run logs under `proc/runs/` and adds a line to `brief.md` when a run fails; `proc notify` records what it sent in `proc/notified.jsonl`.
 
 Every record follows claude-skills' `process/schema.json`, vendored unchanged as `schema/schema.json`. When it changes there, copy it over.
 
