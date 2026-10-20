@@ -125,7 +125,7 @@ func watermarks(t *testing.T, root, profile string) map[string]string {
 	return marks
 }
 
-func TestACleanRunKeepsItsWatermarksAndNotifiesWhatItQueued(t *testing.T) {
+func TestACleanRunKeepsItsWatermarksAndNotifiesUrgentEntries(t *testing.T) {
 	root := fixtureState(t)
 	write(root, "profiles/acme/watermarks.json", acmeMarks)
 	p := &fakeProcess{root: root}

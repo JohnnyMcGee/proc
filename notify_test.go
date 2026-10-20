@@ -59,14 +59,16 @@ func enqueue(t *testing.T, root, id, summary, urgency, status string) {
 	appendTo(t, filepath.Join(root, "queue.jsonl"), string(line)+"\n")
 }
 
-func TestEachUrgencyRuleNotifiesAndNothingElseDoes(t *testing.T) {
+// Triage decides what is urgent from the profile's rules (claude-skills#46 covers the rules themselves); these entries
+// are what it queues for each rule and for asks that miss them.
+func TestEveryUrgentEntryNotifiesAndNothingElseDoes(t *testing.T) {
 	root := fixtureState(t)
 	notifyAll(t, root, &notifier{}) // the fixture's own urgent entry
-	enqueue(t, root, "q-manager-dm", "My manager DMed me", "urgent", "pending")
-	enqueue(t, root, "q-incident", "#incident-42 mentions me", "urgent", "info")
-	enqueue(t, root, "q-deploy", "Review blocks Friday's deploy", "urgent", "pending")
-	enqueue(t, root, "q-peer-dm", "A peer DMed me", "normal", "pending")
-	enqueue(t, root, "q-chatter", "#random chatter", "low", "info")
+	enqueue(t, root, "q-0000000000a1", "My manager DMed me", "urgent", "pending")
+	enqueue(t, root, "q-0000000000a2", "#incident-42 mentions me", "urgent", "info")
+	enqueue(t, root, "q-0000000000a3", "Review blocks Friday's deploy", "urgent", "pending")
+	enqueue(t, root, "q-0000000000b1", "A peer DMed me", "normal", "pending")
+	enqueue(t, root, "q-0000000000b2", "#random chatter", "low", "info")
 	n := &notifier{}
 	notifyAll(t, root, n)
 	want := []string{
@@ -84,8 +86,8 @@ func TestAnUrgentEntryThatNoLongerWaitsOnMeDoesNotNotify(t *testing.T) {
 	if err := appendDecision(root, Decision{EntryID: "q-aaaaaaaaaaa2", Verdict: "skip", At: stamp(now)}); err != nil {
 		t.Fatal(err)
 	}
-	enqueue(t, root, "q-replaced", "An older version of an urgent ask", "urgent", "superseded")
-	enqueue(t, root, "q-done", "Triage handled it silently", "urgent", "done")
+	enqueue(t, root, "q-0000000000c1", "An older version of an urgent ask", "urgent", "superseded")
+	enqueue(t, root, "q-0000000000c2", "Triage handled it silently", "urgent", "done")
 	n := &notifier{}
 	notifyAll(t, root, n)
 	if len(n.sent) != 0 {
