@@ -163,3 +163,45 @@ func TestEscapeFromTheReasonPromptRecordsNothing(t *testing.T) {
 		t.Fatalf("want no decision, got %v", ds)
 	}
 }
+
+// editor points $EDITOR at a script that rewrites the draft file the way I would by hand.
+func editor(t *testing.T, script string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "editor")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDITOR", path)
+}
+
+func TestEditedDraftRoundTripsIntoTheDecision(t *testing.T) {
+	root := fixtureState(t)
+	editor(t, `sed -i 's/per request/per request on purpose/' "$1"`)
+	press(t, start(t, root), "e", "too terse", "enter")
+
+	assertDecision(t, only(t, root), map[string]any{
+		"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve",
+		"draft":  "It is per request on purpose so a stale entry cannot outlive a deploy.",
+		"reason": "too terse", "at": "2026-10-20T09:30:00Z",
+	})
+}
+
+func TestLeavingTheDraftUnchangedRecordsNothing(t *testing.T) {
+	root := fixtureState(t)
+	editor(t, `true`)
+	press(t, start(t, root), "e", "enter")
+
+	if ds := decisions(t, root); len(ds) != 0 {
+		t.Fatalf("want no decision, got %v", ds)
+	}
+}
+
+func TestAFailedEditorRecordsNothing(t *testing.T) {
+	root := fixtureState(t)
+	editor(t, `echo changed > "$1"; exit 1`)
+	press(t, start(t, root), "e", "enter")
+
+	if ds := decisions(t, root); len(ds) != 0 {
+		t.Fatalf("want no decision, got %v", ds)
+	}
+}

@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,7 +38,17 @@ func newModel(root string, now func() time.Time) (*model, error) {
 
 func (m *model) Init() tea.Cmd { return nil }
 
+// edited is the editor exiting on the draft file of an entry.
+type edited struct {
+	entryID, path string
+	err           error
+}
+
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if msg, ok := msg.(edited); ok {
+		m.afterEdit(msg)
+		return m, nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -58,8 +70,63 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ask("skip, reason (optional)", func(reason string) {
 			m.decide(Decision{Verdict: "skip", Reason: reason})
 		})
+	case "e":
+		return m, m.edit()
 	}
 	return m, nil
+}
+
+// edit opens the draft in $EDITOR. The file lives in the state directory, the only place proc writes.
+func (m *model) edit() tea.Cmd {
+	row := m.undecided()
+	if row == nil {
+		return nil
+	}
+	path := filepath.Join(m.root, "proc", row.ID+".md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		m.status = err.Error()
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(row.Action.Draft+"\n"), 0o644); err != nil {
+		m.status = err.Error()
+		return nil
+	}
+	id := row.ID
+	return m.exec(editorCommand(path), func(err error) tea.Msg { return edited{id, path, err} })
+}
+
+func editorCommand(path string) *exec.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	return exec.Command("sh", "-c", editor+` "$1"`, "editor", path) // $EDITOR may carry flags, e.g. "code --wait"
+}
+
+// afterEdit approves the entry with the edited draft, after an optional reason. An unchanged draft or a failed
+// editor records nothing.
+func (m *model) afterEdit(msg edited) {
+	data, err := os.ReadFile(msg.path)
+	os.Remove(msg.path)
+	row := m.current()
+	switch {
+	case row == nil || row.ID != msg.entryID:
+		return
+	case msg.err != nil:
+		m.status = "editor failed, nothing recorded: " + msg.err.Error()
+		return
+	case err != nil:
+		m.status = err.Error()
+		return
+	}
+	draft := strings.TrimRight(string(data), "\n")
+	if draft == row.Action.Draft {
+		m.status = "draft unchanged, nothing recorded"
+		return
+	}
+	m.ask("approve edited draft, reason (optional)", func(reason string) {
+		m.decide(Decision{Verdict: "approve", Draft: draft, Reason: reason})
+	})
 }
 
 func (m *model) ask(label string, submit func(string)) {
