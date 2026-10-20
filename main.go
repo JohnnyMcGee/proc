@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -22,6 +23,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if len(os.Args) > 1 {
+		return command(root, os.Args[1], os.Args[2:])
+	}
 	m, err := newModel(root, time.Now)
 	if err != nil {
 		return err
@@ -36,4 +40,19 @@ func run() error {
 		fmt.Println("proc: executor started in the background; log:", m.executorLog)
 	}
 	return nil
+}
+
+const usage = "usage: proc [count]"
+
+// command runs one of proc's unattended subcommands; with none, proc is the TUI.
+func command(root, name string, args []string) error {
+	switch {
+	case name == "count" && len(args) == 0:
+		line, err := countLine(root, time.Now())
+		if line != "" {
+			fmt.Println(line)
+		}
+		return err
+	}
+	return errors.New(usage)
 }
