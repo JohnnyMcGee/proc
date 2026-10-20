@@ -205,3 +205,21 @@ func TestAFailedEditorRecordsNothing(t *testing.T) {
 		t.Fatalf("want no decision, got %v", ds)
 	}
 }
+
+func TestPromoteToSilentApprovesAndAsksTheExecutorToStopAsking(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "p")
+
+	assertDecision(t, only(t, root), map[string]any{
+		"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve", "promote_to_silent": true, "at": "2026-10-20T09:30:00Z",
+	})
+}
+
+func TestSubmittingAReviewCannotBePromotedToSilent(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "j", "p")
+
+	if ds := decisions(t, root); len(ds) != 0 {
+		t.Fatalf("want no decision, got %v", ds)
+	}
+}

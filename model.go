@@ -72,8 +72,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 	case "e":
 		return m, m.edit()
+	case "p":
+		m.promote()
 	}
 	return m, nil
+}
+
+// promote approves the entry and asks the executor to make its action type silent in the profile from now on.
+func (m *model) promote() {
+	row := m.current()
+	if row != nil && !promotable[row.Action.Type] {
+		m.status = row.Action.Type + " always needs my approval"
+		return
+	}
+	m.decide(Decision{Verdict: "approve", PromoteToSilent: true})
 }
 
 // edit opens the draft in $EDITOR. The file lives in the state directory, the only place proc writes.

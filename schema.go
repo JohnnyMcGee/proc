@@ -19,6 +19,9 @@ const schemaURL = "https://github.com/JohnnyMcGee/claude-skills/process/schema.j
 
 var schemas = map[string]*jsonschema.Schema{}
 
+// promotable is every action type a profile may mark silent, read from the profile's autonomy overrides.
+var promotable = map[string]bool{}
+
 func init() {
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaJSON))
 	if err != nil {
@@ -30,6 +33,13 @@ func init() {
 	}
 	for _, kind := range []string{"queue_entry", "decision", "result"} {
 		schemas[kind] = c.MustCompile(schemaURL + "#/$defs/" + kind)
+	}
+	silent := doc
+	for _, key := range []string{"$defs", "profile", "properties", "autonomy", "properties", "silent", "items", "enum"} {
+		silent = silent.(map[string]any)[key]
+	}
+	for _, action := range silent.([]any) {
+		promotable[action.(string)] = true
 	}
 }
 
