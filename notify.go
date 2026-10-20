@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"time"
@@ -41,6 +42,7 @@ func notifyUrgent(root string, now time.Time, send func(title, body string) erro
 	for _, d := range decisions {
 		done[d.EntryID] = true
 	}
+	var failed []error
 	for _, e := range entries {
 		waiting := e.Status == "pending" || e.Status == "info"
 		created, err := time.Parse(time.RFC3339, e.Created)
@@ -49,18 +51,19 @@ func notifyUrgent(root string, now time.Time, send func(title, body string) erro
 			continue
 		}
 		if err := send("proc: urgent · "+e.Project, e.Summary+"\n"+e.Link); err != nil {
-			return err
+			failed = append(failed, err) // retried next time; the others still go now
+			continue
 		}
 		if err := appendJSONL(path, Notified{EntryID: e.ID, At: stamp(now)}); err != nil {
 			return err
 		}
 	}
-	return nil
+	return errors.Join(failed...)
 }
 
 // notifySend shows a desktop notification that stays until I dismiss it.
 func notifySend(title, body string) error {
-	return runCommand("notify-send", "--urgency=critical", "--app-name=proc", title, body)
+	return runCommand("notify-send", "--urgency=critical", "--app-name=proc", "--", title, body) // a summary may start with -
 }
 
 func appendJSONL(path string, v any) error {

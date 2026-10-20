@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -112,5 +113,24 @@ func TestAnUrgentEntryFromBeforeYesterdayDoesNotInterrupt(t *testing.T) {
 	notifyAll(t, root, n)
 	if len(n.sent) != 0 {
 		t.Fatalf("sent %q for an entry two days old, want nothing", n.sent)
+	}
+}
+
+func TestOneNotificationThatFailsDoesNotHoldBackTheOthers(t *testing.T) {
+	root := fixtureState(t)
+	enqueue(t, root, "q-0000000000d1", "My manager DMed me", "urgent", "pending")
+	var sent []string
+	failFirst := func(title, body string) error {
+		if strings.HasPrefix(body, "Lee") {
+			return errors.New("notify-send: bad argument")
+		}
+		sent = append(sent, body)
+		return nil
+	}
+	if err := notifyUrgent(root, now, failFirst); err == nil {
+		t.Fatal("want the failed send reported")
+	}
+	if len(sent) != 1 || !strings.HasPrefix(sent[0], "My manager DMed me") {
+		t.Fatalf("sent %q, want the DM despite the failure before it", sent)
 	}
 }
