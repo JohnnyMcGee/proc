@@ -370,14 +370,17 @@ func TestEntriesDecidedOverAWeekAgoLeaveTheList(t *testing.T) {
 	}
 }
 
-func TestFixtureQueueFollowsTheSharedSchema(t *testing.T) {
-	var entries []map[string]any
-	if err := readJSONL("testdata/state/process/queue.jsonl", &entries); err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if err := validate("queue_entry", e); err != nil {
-			t.Errorf("%s: %v", e["id"], err)
+// testdata/urgency is what claude-skills' `process run --fixtures` wrote, so it checks the vendored schema too.
+func TestFixtureQueuesFollowTheSharedSchema(t *testing.T) {
+	for _, path := range []string{"testdata/state/process/queue.jsonl", "testdata/urgency/process/queue.jsonl"} {
+		var entries []map[string]any
+		if err := readJSONL(path, &entries); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if err := validate("queue_entry", e); err != nil {
+				t.Errorf("%s: %s: %v", path, e["id"], err)
+			}
 		}
 	}
 }

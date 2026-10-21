@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // notifier records each notification instead of sending it.
@@ -134,5 +137,55 @@ func TestOneNotificationThatFailsDoesNotHoldBackTheOthers(t *testing.T) {
 	}
 	if len(sent) != 1 || !strings.HasPrefix(sent[0], "My manager DMed me") {
 		t.Fatalf("sent %q, want the DM despite the failure before it", sent)
+	}
+}
+
+// The queue claude-skills' `process run --fixtures` writes for its urgency fixtures (claude-skills#48): Mo is the
+// manager, #incidents and #incident-* are incident channels, deploy-blocking is the urgent label.
+func TestProcNotifyInterruptsForExactlyTheUrgentAsksInClaudeSkillsFixtures(t *testing.T) {
+	home := t.TempDir()
+	if err := os.CopyFS(home, os.DirFS("testdata/urgency")); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, "process")
+	bin, sent := t.TempDir(), t.TempDir()
+	write(bin, "notify-send", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(mktemp -p "+sent+")\"\n")
+	if err := os.Chmod(filepath.Join(bin, "notify-send"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	afterTheRun := time.Date(2026, 10, 21, 19, 0, 0, 0, time.UTC)
+	summaries := func() []string {
+		files, err := os.ReadDir(sent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, f := range files {
+			args := strings.Split(read(t, sent, f.Name()), "\n") // --urgency=critical --app-name=proc -- title summary link
+			got = append(got, args[4])
+		}
+		sort.Strings(got)
+		return got
+	}
+
+	if err := notifyUrgent(root, afterTheRun, notifySend); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"Ben asks for my review of PR #102 'Fix checkout rounding' (deploy-blocking)",
+		"Mo asks me to cut WID-15 CSV export scope to orders only and ship Friday",
+		"Mo asks me to join the 2pm with the payments team since they need someone who knows the export",
+		"Ops asks whether the new orders export query is behind the checkout timeouts",
+	}
+	if got := summaries(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("notified %q, want exactly the four urgent asks %q", got, want)
+	}
+
+	if err := notifyUrgent(root, afterTheRun.Add(4*time.Hour), notifySend); err != nil {
+		t.Fatal(err)
+	}
+	if got := summaries(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("a second proc notify notified again: %q", got)
 	}
 }

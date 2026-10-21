@@ -52,4 +52,4 @@ On quit, proc runs the executor as `process execute` (claude-skills' process CLI
 
 ## Development
 
-`go test ./...` drives the TUI with key sequences over the fixture queue in `testdata/state` and checks the decisions it writes. CI runs gofmt, `go vet`, `go test` and `go build` on every PR.
+`go test ./...` drives the TUI with key sequences over the fixture queue in `testdata/state` and checks the decisions it writes. `testdata/urgency` is the state that claude-skills' `process run --fixtures` wrote for its example profile (`process/profiles/acme.md`, with its `workdir` pointed at a directory whose `.claude/skills` holds the process skills) into a scratch `XDG_STATE_HOME`; `proc notify` must interrupt for exactly its four urgent entries. Regenerate it the same way when the fixtures or the urgency rules change there. CI runs gofmt, `go vet`, `go test` and `go build` on every PR.
