@@ -191,8 +191,19 @@ func (i *initializer) createProfile() error {
 		}
 		return nil
 	})
-	if err := i.ask(huh.NewGroup(name)); err != nil {
-		return err
+	path := ""
+	for replace := false; !replace; {
+		if err := i.ask(huh.NewGroup(name)); err != nil {
+			return err
+		}
+		path = filepath.Join(i.configHome, "process", "profiles", a.name+".md")
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			break
+		}
+		confirm := huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Replace it?", path)).Value(&replace)
+		if err := i.ask(huh.NewGroup(confirm)); err != nil {
+			return err
+		}
 	}
 	a.workdir = "~/code/" + a.name
 	// The profile waits in a scratch config directory until process accepts it: no invalid profile reaches mine.
@@ -202,7 +213,6 @@ func (i *initializer) createProfile() error {
 	}
 	defer os.RemoveAll(scratch)
 	draft := filepath.Join(scratch, "process", "profiles", a.name+".md")
-	path := filepath.Join(i.configHome, "process", "profiles", a.name+".md")
 	for {
 		if err := i.ask(huh.NewGroup(
 			huh.NewInput().Title("Workdir: headless phases run here, so its .mcp.json servers load").Value(&a.workdir),

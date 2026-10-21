@@ -242,3 +242,20 @@ func TestStoppingAfterARefusedAnswerLeavesNoProfile(t *testing.T) {
 		t.Errorf("left %v behind in TMPDIR", scratch)
 	}
 }
+
+func TestInitAsksBeforeReplacingAProfileAndKeepsItWhenToldTo(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	write(i.home, ".config/process/profiles/widgets.md", "my own profile\n")
+	lines := widgets(checkout)
+	answer(i, append([]string{checkout, "widgets", "n", "gizmos"}, lines[2:]...)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := read(t, i.home, ".config/process/profiles/widgets.md"); got != "my own profile\n" {
+		t.Errorf("widgets.md was replaced:\n%s", got)
+	}
+	if got := profile(t, filepath.Join(i.home, ".config/process/profiles/gizmos.md")); got["name"] != "gizmos" {
+		t.Errorf("gizmos profile = %#v", got)
+	}
+}
