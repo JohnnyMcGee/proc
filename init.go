@@ -99,6 +99,9 @@ func (i *initializer) init() error {
 	if err != nil {
 		return err
 	}
+	if _, err := os.Stat(i.expand(a.workdir)); err != nil {
+		fmt.Fprintf(i.out, "proc: warning: %s does not exist; every phase runs there, so clone or create it first\n", a.workdir)
+	}
 	if err := i.dryRun(checkout, a.name); err != nil {
 		return err
 	}

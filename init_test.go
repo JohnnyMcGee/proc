@@ -344,18 +344,48 @@ func TestInitEndsWithWhatTheLiveRunNeedsThenProcInstall(t *testing.T) {
 	if strings.Contains(next, "not on your PATH") {
 		t.Errorf("warned about PATH, which holds ~/.local/bin:\n%s", next)
 	}
+	if !strings.Contains(next, "~/code/widgets does not exist") {
+		t.Errorf("did not warn that the workdir is missing:\n%s", next)
+	}
 
 	out.Reset()
 	i.path = "/usr/bin:/bin"
+	write(i.home, "code/gadgets/README.md", "")
 	answer(i, "gadgets", "", "2", "3", "4", "5", "6", "0", "acme/gadgets", "", "", "", "", "", "", "n")
 	if err := i.init(); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	_, next, _ = strings.Cut(out.String(), "proc: wrote")
+	if strings.Contains(next, "does not exist") {
+		t.Errorf("warned about a workdir that exists:\n%s", next)
+	}
 	if strings.Contains(next, "Gmail") {
 		t.Errorf("a GitHub-only profile's next steps mention Gmail:\n%s", next)
 	}
 	if !strings.Contains(out.String(), filepath.Join(i.home, ".local/bin")+" is not on your PATH") {
 		t.Errorf("did not warn that process is not on PATH:\n%s", out)
+	}
+}
+
+// With PROC_CLAUDE_SKILLS naming a claude-skills checkout, proc init runs against its real process CLI: the vendored
+// example profile, filled in, must still be one that process accepts.
+func TestInitWritesAProfileTheRealProcessAccepts(t *testing.T) {
+	checkout := os.Getenv("PROC_CLAUDE_SKILLS")
+	if checkout == "" {
+		t.Skip("set PROC_CLAUDE_SKILLS to a claude-skills checkout to run proc init against its process CLI")
+	}
+	i, out := setupInit(t)
+	lines := widgets(checkout)
+	lines[15] = "incidents"
+	lines = append(lines[:len(lines)-1], "", "0", "", "", "", "", "", "", "", "", "", "", "", "#incidents", "", "n")
+	answer(i, lines...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "'incidents' does not match ^#") {
+		t.Errorf("did not show process profiles' error:\n%s", out)
+	}
+	if problem, err := i.check(i.configHome); err != nil || problem != "" {
+		t.Fatalf("process refuses the written profile: %v %s", err, problem)
 	}
 }
