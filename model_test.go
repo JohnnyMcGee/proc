@@ -18,8 +18,14 @@ var now = time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)
 // fixtureState copies testdata/state into a scratch XDG_STATE_HOME and returns the process state directory.
 func fixtureState(t *testing.T) string {
 	t.Helper()
+	return fixtureStateFrom(t, "testdata/state")
+}
+
+// fixtureStateFrom copies a fixture XDG_STATE_HOME into a scratch one and returns the process state directory.
+func fixtureStateFrom(t *testing.T, dir string) string {
+	t.Helper()
 	home := t.TempDir()
-	if err := os.CopyFS(home, os.DirFS("testdata/state")); err != nil {
+	if err := os.CopyFS(home, os.DirFS(dir)); err != nil {
 		t.Fatal(err)
 	}
 	return filepath.Join(home, "process")

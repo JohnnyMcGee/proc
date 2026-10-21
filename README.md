@@ -52,4 +52,16 @@ On quit, proc runs the executor as `process execute` (claude-skills' process CLI
 
 ## Development
 
-`go test ./...` drives the TUI with key sequences over the fixture queue in `testdata/state` and checks the decisions it writes. `testdata/urgency` is the state that claude-skills' `process run --fixtures` wrote for its example profile (`process/profiles/acme.md`, with its `workdir` pointed at a directory whose `.claude/skills` holds the process skills) into a scratch `XDG_STATE_HOME`; `proc notify` must interrupt for exactly its four urgent entries. Regenerate it the same way when the fixtures or the urgency rules change there. CI runs gofmt, `go vet`, `go test` and `go build` on every PR.
+`go test ./...` drives the TUI with key sequences over the fixture queue in `testdata/state` and checks the decisions it writes. `testdata/urgency` is the state that claude-skills' `process run --fixtures` wrote for its example profile; `proc notify` must interrupt for exactly its four urgent entries. When the fixtures or the urgency rules change there, regenerate it from a claude-skills checkout (`$CS`), then update the test's timestamp and expected notifications:
+
+```bash
+tmp=$(mktemp -d) && mkdir -p "$tmp/bin" "$tmp/config/process/profiles" "$tmp/work/.claude/skills"
+printf '#!/bin/sh\nexec python3 %s/process/process.py "$@"\n' "$CS" > "$tmp/bin/process" && chmod +x "$tmp/bin/process"
+sed "s|^workdir = .*|workdir = \"$tmp/work\"|" "$CS/process/profiles/acme.md" > "$tmp/config/process/profiles/acme.md"
+for s in sweep-github sweep-linear sweep-slack sweep-gmail sweep-calendar sweep-meetings triage next-work execute; do ln -s "$CS/$s" "$tmp/work/.claude/skills/$s"; done
+PATH="$tmp/bin:$PATH" XDG_STATE_HOME="$tmp/state" XDG_CONFIG_HOME="$tmp/config" process run --fixtures "$CS/process/fixtures"
+cp "$tmp"/state/process/{queue,results}.jsonl testdata/urgency/process/
+cp "$tmp/state/process/profiles/acme/items.jsonl" testdata/urgency/process/profiles/acme/
+```
+
+CI runs gofmt, `go vet`, `go test` and `go build` on every PR.
