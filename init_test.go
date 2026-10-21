@@ -259,3 +259,39 @@ func TestInitAsksBeforeReplacingAProfileAndKeepsItWhenToldTo(t *testing.T) {
 		t.Errorf("gizmos profile = %#v", got)
 	}
 }
+
+func TestTheProfileOpensInTheEditorAndAnEditProcessRefusesOpensItAgain(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	edits := []func(string) string{
+		func(text string) string {
+			return strings.Replace(text, `labels = ["deploy-blocking"]`, `channels = ["incidents"]`, 1)
+		},
+		func(text string) string {
+			return strings.Replace(text, `channels = ["incidents"]`, `labels = ["deploy-blocking", "hotfix"]`, 1)
+		},
+	}
+	var opened []string
+	i.editor = func(path string) error {
+		opened = append(opened, path)
+		if len(opened) > len(edits) {
+			t.Fatalf("opened the editor a %d time", len(opened))
+		}
+		write("/", path, edits[len(opened)-1](read(t, "/", path)))
+		return nil
+	}
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("opened the editor %d times, want twice: once, then again after the edit process refused", len(opened))
+	}
+	if !strings.Contains(out.String(), "does not match ^#") {
+		t.Errorf("did not show process profiles' error:\n%s", out)
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	if want := []any{"deploy-blocking", "hotfix"}; !reflect.DeepEqual(got["urgency"].(map[string]any)["labels"], want) {
+		t.Errorf("urgency = %#v, want the edited labels %q", got["urgency"], want)
+	}
+}

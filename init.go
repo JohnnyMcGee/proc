@@ -242,6 +242,20 @@ func (i *initializer) createProfile() error {
 		}
 		fmt.Fprintf(i.out, "%s\nproc: process refused the profile; answer again\n", strings.ReplaceAll(problem, draft, path))
 	}
+	for {
+		fmt.Fprintln(i.out, "proc: opening the profile in $EDITOR for a final look")
+		if err := i.editor(draft); err != nil {
+			return fmt.Errorf("the editor failed (%w); %s was not written", err, path)
+		}
+		problem, err := i.check(scratch)
+		if err != nil {
+			return err
+		}
+		if problem == "" {
+			break
+		}
+		fmt.Fprintf(i.out, "%s\nproc: process refused the edit; fix it in the editor\n", strings.ReplaceAll(problem, draft, path))
+	}
 	text, err := os.ReadFile(draft)
 	if err != nil {
 		return err
