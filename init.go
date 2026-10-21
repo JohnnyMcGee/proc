@@ -94,7 +94,11 @@ func (i *initializer) init() error {
 	if err := i.installPipeline(checkout); err != nil {
 		return err
 	}
-	return i.createProfile()
+	name, err := i.createProfile()
+	if err != nil {
+		return err
+	}
+	return i.dryRun(checkout, name)
 }
 
 // checkout is my claude-skills checkout: the one I named last time, else where I say it is, remembered for next time.
@@ -182,8 +186,8 @@ type answers struct {
 
 var sources = []string{"github", "linear", "slack", "gmail", "calendar", "meetings"}
 
-// createProfile asks for a project's values and writes its profile from the example's.
-func (i *initializer) createProfile() error {
+// createProfile asks for a project's values and writes its profile from the example's, returning its name.
+func (i *initializer) createProfile() (string, error) {
 	a := answers{sources: sources, noiseLabel: "Noise", timezone: i.zone}
 	name := huh.NewInput().Title("Project name").Value(&a.name).Validate(func(s string) error {
 		if !profileName.MatchString(s) {
@@ -194,7 +198,7 @@ func (i *initializer) createProfile() error {
 	path := ""
 	for replace := false; !replace; {
 		if err := i.ask(huh.NewGroup(name)); err != nil {
-			return err
+			return "", err
 		}
 		path = filepath.Join(i.configHome, "process", "profiles", a.name+".md")
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -202,14 +206,14 @@ func (i *initializer) createProfile() error {
 		}
 		confirm := huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Replace it?", path)).Value(&replace)
 		if err := i.ask(huh.NewGroup(confirm)); err != nil {
-			return err
+			return "", err
 		}
 	}
 	a.workdir = "~/code/" + a.name
 	// The profile waits in a scratch config directory until process accepts it: no invalid profile reaches mine.
 	scratch, err := os.MkdirTemp("", "proc-init-")
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer os.RemoveAll(scratch)
 	draft := filepath.Join(scratch, "process", "profiles", a.name+".md")
@@ -218,24 +222,24 @@ func (i *initializer) createProfile() error {
 			huh.NewInput().Title("Workdir: headless phases run here, so its .mcp.json servers load").Value(&a.workdir),
 			huh.NewMultiSelect[string]().Title("Sources").Options(huh.NewOptions(sources...)...).Value(&a.sources),
 		)); err != nil {
-			return err
+			return "", err
 		}
 		if err := i.ask(i.questions(&a)...); err != nil {
-			return err
+			return "", err
 		}
 		text, err := renderProfile(a, i.now())
 		if err != nil {
-			return err
+			return "", err
 		}
 		if err := os.MkdirAll(filepath.Dir(draft), 0o755); err != nil {
-			return err
+			return "", err
 		}
 		if err := os.WriteFile(draft, []byte(text), 0o644); err != nil {
-			return err
+			return "", err
 		}
 		problem, err := i.check(scratch)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if problem == "" {
 			break
@@ -245,11 +249,11 @@ func (i *initializer) createProfile() error {
 	for {
 		fmt.Fprintln(i.out, "proc: opening the profile in $EDITOR for a final look")
 		if err := i.editor(draft); err != nil {
-			return fmt.Errorf("the editor failed (%w); %s was not written", err, path)
+			return "", fmt.Errorf("the editor failed (%w); %s was not written", err, path)
 		}
 		problem, err := i.check(scratch)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if problem == "" {
 			break
@@ -258,23 +262,53 @@ func (i *initializer) createProfile() error {
 	}
 	text, err := os.ReadFile(draft)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return "", err
 	}
 	if err := os.WriteFile(path, text, 0o644); err != nil {
-		return err
+		return "", err
 	}
 	fmt.Fprintln(i.out, "proc: wrote", path)
-	return nil
+	return a.name, nil
 }
 
-// process runs the process CLI proc init put on PATH, as the shell will, whether or not PATH has it yet.
+// process runs the process CLI proc init put on PATH, as the shell will, whether or not PATH has it yet: its headless
+// phases call it too.
 func (i *initializer) process(env []string, args ...string) *exec.Cmd {
-	cmd := exec.Command(filepath.Join(i.home, ".local", "bin", "process"), args...)
-	cmd.Env = append(os.Environ(), env...)
+	bin := filepath.Join(i.home, ".local", "bin")
+	cmd := exec.Command(filepath.Join(bin, "process"), args...)
+	cmd.Env = append(os.Environ(), append([]string{"PATH=" + bin + string(filepath.ListSeparator) + i.path}, env...)...)
 	return cmd
+}
+
+// dryRun offers a `process run` of the new profile on claude-skills' fixtures, in a scratch state directory that it
+// removes afterwards: the queue in ~/.local/state/process stays as it was.
+func (i *initializer) dryRun(checkout, name string) error {
+	run := false
+	confirm := huh.NewConfirm().Value(&run).Title("Dry-run the profile on claude-skills' fixtures now?").
+		Description("No service is called, but each phase runs as headless Claude, which takes a few minutes.")
+	if err := i.ask(huh.NewGroup(confirm)); err != nil || !run {
+		return err
+	}
+	state, err := os.MkdirTemp("", "proc-dry-run-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(state)
+	cmd := i.process([]string{"XDG_STATE_HOME=" + state, "XDG_CONFIG_HOME=" + i.configHome},
+		"run", "--fixtures", filepath.Join(checkout, "process", "fixtures"), "--project", name)
+	cmd.Stdout, cmd.Stderr = i.out, i.out
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(i.out, "proc: the dry run failed: %v\n", err)
+	}
+	brief := filepath.Join(state, "process", "brief.md")
+	if data, err := os.ReadFile(brief); err == nil {
+		fmt.Fprintf(i.out, "proc: the dry run's brief, %s:\n\n%s\n", brief, data)
+	}
+	done := huh.NewNote().Title("Its scratch state directory goes next.").Next(true).NextLabel("Remove it")
+	return i.ask(huh.NewGroup(done))
 }
 
 // check runs `process profiles` over the profiles in configHome, returning what it refuses, if anything.

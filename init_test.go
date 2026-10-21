@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -293,5 +294,36 @@ func TestTheProfileOpensInTheEditorAndAnEditProcessRefusesOpensItAgain(t *testin
 	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
 	if want := []any{"deploy-blocking", "hotfix"}; !reflect.DeepEqual(got["urgency"].(map[string]any)["labels"], want) {
 		t.Errorf("urgency = %#v, want the edited labels %q", got["urgency"], want)
+	}
+}
+
+func TestTheDryRunUsesAScratchStateDirectoryShowsTheBriefAndRemovesIt(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, log := fakeCheckout(t)
+	lines := widgets(checkout)
+	lines[len(lines)-1] = "y"
+	answer(i, lines...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	calls := strings.Split(strings.TrimSpace(read(t, "/", log)), "\n")
+	if want := "run --fixtures " + filepath.Join(checkout, "process/fixtures") + " --project widgets"; !slices.Contains(calls, want) {
+		t.Fatalf("did not run %q; process ran %q", want, calls)
+	}
+	var state string
+	for _, call := range calls {
+		if dir, ok := strings.CutPrefix(call, "state "); ok {
+			state = dir
+		}
+	}
+	if state == "" || strings.HasPrefix(state, i.home) || strings.HasPrefix(state, os.Getenv("HOME")) {
+		t.Fatalf("the dry run's XDG_STATE_HOME = %q, want a scratch directory", state)
+	}
+	brief := filepath.Join(state, "process", "brief.md")
+	if !strings.Contains(out.String(), brief) || !strings.Contains(out.String(), "# The dry-run brief") {
+		t.Errorf("did not show the brief or where it is:\n%s", out)
+	}
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Errorf("the scratch state directory is still there: %v", err)
 	}
 }
