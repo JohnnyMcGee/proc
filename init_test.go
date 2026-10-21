@@ -142,3 +142,56 @@ func TestInitOnAFreshHomeLinksTheSkillsInstallsProcessAndWritesTheProfile(t *tes
 		}
 	}
 }
+
+// tree is every file under dir with its content, and every link with its target.
+func tree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil || d.IsDir():
+		case d.Type()&os.ModeSymlink != 0:
+			files[path], err = os.Readlink(path)
+			files[path] = "-> " + files[path]
+		default:
+			files[path] = read(t, "/", path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestASecondInitRemembersTheCheckoutSkipsTheInstallAndAddsAProfile(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	before := tree(t, i.home)
+	out.Reset()
+	answer(i, // no checkout: it is remembered
+		"gadgets", "", "3", "4", "5", "6", "0", // github and linear only
+		"acme/gadgets", "GAD", "", "", "", "", "", "",
+		"n",
+	)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "proc: linked") || !strings.Contains(out.String(), "already linked") {
+		t.Errorf("want every install step reported as already done:\n%s", out)
+	}
+	after := tree(t, i.home)
+	for path, text := range before {
+		if after[path] != text {
+			t.Errorf("the second init changed %s", path)
+		}
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/gadgets.md"))
+	if got["name"] != "gadgets" || !reflect.DeepEqual(got["sources"], []any{"github", "linear"}) || got["slack"] != nil || got["google"] != nil {
+		t.Errorf("gadgets profile = %#v", got)
+	}
+}

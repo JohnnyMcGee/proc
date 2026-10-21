@@ -96,19 +96,38 @@ func (i *initializer) init() error {
 	return i.createProfile()
 }
 
-// checkout asks where my claude-skills checkout is.
+// checkout is my claude-skills checkout: the one I named last time, else where I say it is, remembered for next time.
 func (i *initializer) checkout() (string, error) {
+	remembered := filepath.Join(i.configHome, "proc", "claude-skills")
+	if data, err := os.ReadFile(remembered); err == nil {
+		dir := strings.TrimSpace(string(data))
+		if isCheckout(dir) == nil {
+			fmt.Fprintln(i.out, "proc: using the claude-skills checkout at", dir)
+			return dir, nil
+		}
+	}
 	var dir string
 	field := huh.NewInput().Title("Where is your claude-skills checkout?").Value(&dir).Validate(func(s string) error {
-		if _, err := os.Stat(filepath.Join(i.expand(s), "process", "process.py")); err != nil {
-			return fmt.Errorf("no process/process.py there")
-		}
-		return nil
+		return isCheckout(i.expand(s))
 	})
 	if err := i.ask(huh.NewGroup(field)); err != nil {
 		return "", err
 	}
-	return filepath.Abs(i.expand(dir))
+	dir, err := filepath.Abs(i.expand(dir))
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(remembered), 0o755); err != nil {
+		return "", err
+	}
+	return dir, os.WriteFile(remembered, []byte(dir+"\n"), 0o644)
+}
+
+func isCheckout(dir string) error {
+	if _, err := os.Stat(filepath.Join(dir, "process", "process.py")); err != nil {
+		return errors.New("no process/process.py there")
+	}
+	return nil
 }
 
 // installPipeline links each process skill to the checkout, so a `git pull` there upgrades it, and `process` onto
@@ -131,8 +150,16 @@ func (i *initializer) installPipeline(checkout string) error {
 	return i.link(filepath.Join(skillsDir, "process", "process.py"), filepath.Join(i.home, ".local", "bin", "process"))
 }
 
-// link makes path a symlink to target, unless it is one already.
+// link makes path a symlink to target, unless it is one already. Anything else at path stays: it may be a copy I made
+// by hand, and it is mine to remove.
 func (i *initializer) link(target, path string) error {
+	if current, err := os.Readlink(path); err == nil && current == target {
+		fmt.Fprintf(i.out, "proc: already linked: %s\n", path)
+		return nil
+	} else if _, err := os.Lstat(path); err == nil {
+		fmt.Fprintf(i.out, "proc: left %s as it is; remove it and run proc init again to link it to %s\n", path, target)
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
