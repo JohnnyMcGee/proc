@@ -316,7 +316,7 @@ func TestTheDryRunUsesAScratchStateDirectoryShowsTheBriefAndRemovesIt(t *testing
 			state = dir
 		}
 	}
-	if state == "" || strings.HasPrefix(state, i.home) || strings.HasPrefix(state, os.Getenv("HOME")) {
+	if state == "" || strings.HasPrefix(state, i.home) || strings.HasPrefix(state, filepath.Join(os.Getenv("HOME"), ".local", "state")) {
 		t.Fatalf("the dry run's XDG_STATE_HOME = %q, want a scratch directory", state)
 	}
 	brief := filepath.Join(state, "process", "brief.md")
@@ -403,5 +403,119 @@ func TestInitLeavesASkillICopiedByHandAndSaysSo(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "left "+filepath.Join(i.home, ".claude/skills/brief")+" as it is") {
 		t.Errorf("did not say it left brief alone:\n%s", out)
+	}
+}
+
+// stubProcess replaces the fake checkout's process CLI with a script.
+func stubProcess(t *testing.T, checkout, script string) {
+	t.Helper()
+	write(checkout, "process/process.py", "#!/bin/sh\n"+script)
+}
+
+func TestTheNameProcessReservesIsRefusedAsItIsTyped(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	lines := widgets(checkout)
+	answer(i, append([]string{checkout, "unsorted"}, lines[1:]...)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "reserved") {
+		t.Errorf("did not refuse the name unsorted:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(i.home, ".config/process/profiles/widgets.md")); err != nil {
+		t.Errorf("did not go on to the next name: %v", err)
+	}
+}
+
+func TestALastAnswerWithoutANewlineStillCounts(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	i.in = strings.NewReader(strings.Join(widgets(checkout), "\n"))
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "proc install") {
+		t.Errorf("did not finish:\n%s", out)
+	}
+}
+
+func TestAProcessThatCannotRunStopsInitInsteadOfAskingAgain(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	stubProcess(t, checkout, "echo 'env: python3: No such file or directory' >&2\nexit 127\n")
+	answer(i, widgets(checkout)...)
+	err := i.init()
+	if err == nil || !strings.Contains(err.Error(), "python3") {
+		t.Fatalf("want process' failure as the error, got %v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "answer again") {
+		t.Errorf("asked again although no answer could help:\n%s", out)
+	}
+}
+
+func TestACheckoutWhoseProcessRefusesTheExampleProfileIsReportedBeforeAnyQuestion(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	stubProcess(t, checkout, "echo \"process: profile $XDG_CONFIG_HOME/x.md:\"\necho \"  \\$: additional property 'afk'\"\nexit 1\n")
+	answer(i, checkout)
+	err := i.init()
+	if err == nil || !strings.Contains(err.Error(), "git pull") || !strings.Contains(err.Error(), "additional property 'afk'") {
+		t.Fatalf("want an error saying the checkout is too old, got %v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "Project name") {
+		t.Errorf("asked questions no answer could get past:\n%s", out)
+	}
+}
+
+func TestWithoutAnEditorTheProfileIsWrittenAndISeeWhereToEditIt(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	i.editor = nil // the answers come from a pipe: no terminal for one
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	path := filepath.Join(i.home, ".config/process/profiles/widgets.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "no editor") || !strings.Contains(out.String(), path) {
+		t.Errorf("did not say the editor was skipped and where the profile is:\n%s", out)
+	}
+}
+
+func TestAnExampleWithMultiLineArraysIsFilledInWhole(t *testing.T) {
+	saved := exampleProfile
+	t.Cleanup(func() { exampleProfile = saved })
+	exampleProfile = strings.Replace(exampleProfile, `watchlist = ["#incidents", "#deploys"]`, "watchlist = [\n  \"#incidents\",\n  [\"#nested\"],\n  \"#deploys\",\n]", 1)
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	if want := []any{"#incidents", "#deploys"}; !reflect.DeepEqual(got["slack"].(map[string]any)["watchlist"], want) {
+		t.Errorf("watchlist = %#v, want %#v", got["slack"], want)
+	}
+}
+
+func TestNoSourcesIsAnswerProcessRefusesNotBrokenTOML(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	stubProcess(t, checkout, `for f in "$XDG_CONFIG_HOME"/process/profiles/*.md; do
+	grep -q '^sources = \[\]' "$f" && { echo "process: profile $f:"; echo "  \$.sources: fewer than 1 items"; exit 1; }
+	grep -q '^sources = \[' "$f" || { echo "process: $f: invalid TOML"; exit 1; }
+done
+exit 0
+`)
+	lines := widgets(checkout)
+	answer(i, append(append(lines[:3:3], "1", "2", "3", "4", "5", "6", "0", "", "", "", "", "", "", "", "", "", "", "", "", "", "1", "0"), lines[4:]...)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "fewer than 1 items") {
+		t.Errorf("did not show process' error for no sources:\n%s", out)
 	}
 }

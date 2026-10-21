@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -34,8 +34,8 @@ type initializer struct {
 	path       string    // PATH, to say when the directory `process` goes in is not on it
 	in         io.Reader // the answers, when the forms are accessible: one per line
 	out        io.Writer
-	accessible bool // plain prompts over in and out instead of the TUI forms, for screen readers and scripts
-	editor     func(path string) error
+	accessible bool                    // plain prompts over in and out instead of the TUI forms, for screen readers and scripts
+	editor     func(path string) error // nil: no terminal to open one on
 	now        func() time.Time
 	zone       string // my IANA time zone, for the profile; empty keeps the example's
 }
@@ -51,21 +51,24 @@ func newInitializer() (*initializer, error) {
 	if configHome == "" {
 		configHome = filepath.Join(home, ".config")
 	}
-	return &initializer{
+	i := &initializer{
 		home:       home,
 		configHome: configHome,
 		path:       os.Getenv("PATH"),
 		in:         os.Stdin,
 		out:        os.Stdout,
 		accessible: os.Getenv("ACCESSIBLE") != "" || !term.IsTerminal(os.Stdin.Fd()),
-		editor: func(path string) error {
-			cmd := editorCommand(path)
+		now:        time.Now,
+		zone:       localZone(),
+	}
+	if term.IsTerminal(os.Stdin.Fd()) { // answers from a pipe leave no terminal for an editor
+		i.editor = func(file string) error {
+			cmd := editorCommand(file)
 			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 			return cmd.Run()
-		},
-		now:  time.Now,
-		zone: localZone(),
-	}, nil
+		}
+	}
+	return i, nil
 }
 
 // localZone is this machine's IANA time zone: $TZ, else what /etc/localtime links to; empty when neither says.
@@ -95,6 +98,9 @@ func (i *initializer) init() error {
 	if err := i.installPipeline(checkout); err != nil {
 		return err
 	}
+	if err := i.checkExample(); err != nil {
+		return err
+	}
 	a, err := i.createProfile()
 	if err != nil {
 		return err
@@ -119,7 +125,7 @@ func (i *initializer) nextSteps(a answers) {
 		}
 	}
 	// triage, next-work and the executor read Linear whatever the sources.
-	fmt.Fprintf(i.out, "  - add the Linear MCP server (linear-server) to %s\n", path.Join(a.workdir, ".mcp.json"))
+	fmt.Fprintf(i.out, "  - add the Linear MCP server (linear-server) to %s\n", filepath.Join(a.workdir, ".mcp.json"))
 	fmt.Fprintln(i.out, "proc: then run proc install to sweep on a timer")
 }
 
@@ -171,6 +177,12 @@ func (i *initializer) installPipeline(checkout string) error {
 	skillsDir := filepath.Join(i.home, ".claude", "skills")
 	var already []string
 	for _, skill := range skills {
+		if info, err := os.Stat(filepath.Join(checkout, skill)); err != nil || !info.IsDir() {
+			if !strings.HasPrefix(skill, "sweep-") {
+				fmt.Fprintf(i.out, "proc: warning: the checkout has no %s skill; git pull it and run proc init again\n", skill)
+			}
+			continue
+		}
 		done, err := i.link(filepath.Join(checkout, skill), filepath.Join(skillsDir, skill))
 		if err != nil {
 			return err
@@ -190,7 +202,7 @@ func (i *initializer) installPipeline(checkout string) error {
 	if len(already) > 0 {
 		fmt.Fprintln(i.out, "proc: already linked:", strings.Join(already, ", "))
 	}
-	if !slices.Contains(filepath.SplitList(i.path), bin) {
+	if !slices.ContainsFunc(filepath.SplitList(i.path), func(dir string) bool { return filepath.Clean(dir) == bin }) {
 		fmt.Fprintf(i.out, "proc: warning: %s is not on your PATH; add it, or process and the timed runs will not be found\n", bin)
 	}
 	return nil
@@ -198,20 +210,20 @@ func (i *initializer) installPipeline(checkout string) error {
 
 // link makes path a symlink to target, unless it is one already (done). Anything else at path stays: it may be a copy
 // I made by hand, and it is mine to remove.
-func (i *initializer) link(target, path string) (done bool, err error) {
-	if current, err := os.Readlink(path); err == nil && current == target {
+func (i *initializer) link(target, file string) (done bool, err error) {
+	if current, err := os.Readlink(file); err == nil && current == target {
 		return true, nil
-	} else if _, err := os.Lstat(path); err == nil {
-		fmt.Fprintf(i.out, "proc: left %s as it is; remove it and run proc init again to link it to %s\n", path, target)
+	} else if _, err := os.Lstat(file); err == nil {
+		fmt.Fprintf(i.out, "proc: left %s as it is; remove it and run proc init again to link it to %s\n", file, target)
 		return false, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
 		return false, err
 	}
-	if err := os.Symlink(target, path); err != nil {
+	if err := os.Symlink(target, file); err != nil {
 		return false, err
 	}
-	fmt.Fprintf(i.out, "proc: linked %s -> %s\n", path, target)
+	fmt.Fprintf(i.out, "proc: linked %s -> %s\n", file, target)
 	return false, nil
 }
 
@@ -233,18 +245,21 @@ func (i *initializer) createProfile() (answers, error) {
 		if !profileName.MatchString(s) {
 			return errors.New("lowercase letters, digits and dashes, starting with a letter or digit")
 		}
+		if s == "unsorted" {
+			return errors.New("unsorted is reserved for items no profile claims")
+		}
 		return nil
 	})
-	path := ""
+	dest := ""
 	for replace := false; !replace; {
 		if err := i.ask(huh.NewGroup(name)); err != nil {
 			return a, err
 		}
-		path = filepath.Join(i.configHome, "process", "profiles", a.name+".md")
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		dest = filepath.Join(i.configHome, "process", "profiles", a.name+".md")
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
 			break
 		}
-		confirm := huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Replace it?", path)).Value(&replace)
+		confirm := huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Replace it?", dest)).Value(&replace)
 		if err := i.ask(huh.NewGroup(confirm)); err != nil {
 			return a, err
 		}
@@ -284,12 +299,12 @@ func (i *initializer) createProfile() (answers, error) {
 		if problem == "" {
 			break
 		}
-		fmt.Fprintf(i.out, "%s\nproc: process refused the profile; answer again\n", strings.ReplaceAll(problem, draft, path))
+		fmt.Fprintf(i.out, "%s\nproc: process refused the profile; answer again\n", strings.ReplaceAll(problem, draft, dest))
 	}
-	for {
+	for i.editor != nil {
 		fmt.Fprintln(i.out, "proc: opening the profile in $EDITOR for a final look")
 		if err := i.editor(draft); err != nil {
-			return a, fmt.Errorf("the editor failed (%w); %s was not written", err, path)
+			return a, fmt.Errorf("the editor failed (%w); %s was not written", err, dest)
 		}
 		problem, err := i.check(scratch)
 		if err != nil {
@@ -298,19 +313,22 @@ func (i *initializer) createProfile() (answers, error) {
 		if problem == "" {
 			break
 		}
-		fmt.Fprintf(i.out, "%s\nproc: process refused the edit; fix it in the editor\n", strings.ReplaceAll(problem, draft, path))
+		fmt.Fprintf(i.out, "%s\nproc: process refused the edit; fix it in the editor\n", strings.ReplaceAll(problem, draft, dest))
 	}
 	text, err := os.ReadFile(draft)
 	if err != nil {
 		return a, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return a, err
 	}
-	if err := os.WriteFile(path, text, 0o644); err != nil {
+	if err := os.WriteFile(dest, text, 0o644); err != nil {
 		return a, err
 	}
-	fmt.Fprintln(i.out, "proc: wrote", path)
+	fmt.Fprintln(i.out, "proc: wrote", dest)
+	if i.editor == nil {
+		fmt.Fprintln(i.out, "proc: the answers came from a pipe, so no editor opened; give it a final look there")
+	}
 	return a, nil
 }
 
@@ -340,7 +358,15 @@ func (i *initializer) dryRun(checkout, name string) error {
 	cmd := i.process([]string{"XDG_STATE_HOME=" + state, "XDG_CONFIG_HOME=" + i.configHome},
 		"run", "--fixtures", filepath.Join(checkout, "process", "fixtures"), "--project", name)
 	cmd.Stdout, cmd.Stderr = i.out, i.out
-	if err := cmd.Run(); err != nil {
+	// ctrl+c stops process (the terminal sends it the signal too); proc lives on to remove the scratch directory.
+	interrupted := make(chan os.Signal, 1)
+	signal.Notify(interrupted, os.Interrupt)
+	err = cmd.Run()
+	signal.Stop(interrupted)
+	if len(interrupted) > 0 {
+		return errors.New("the dry run was interrupted; its scratch state directory is removed")
+	}
+	if err != nil {
 		fmt.Fprintf(i.out, "proc: the dry run failed: %v\n", err)
 	}
 	brief := filepath.Join(state, "process", "brief.md")
@@ -351,13 +377,40 @@ func (i *initializer) dryRun(checkout, name string) error {
 	return i.ask(huh.NewGroup(done))
 }
 
-// check runs `process profiles` over the profiles in configHome, returning what it refuses, if anything.
+// check runs `process profiles` over the profiles in configHome, returning what it refuses, if anything. process
+// failing any other way (no python3, say) is an error: no answer could get past it.
 func (i *initializer) check(configHome string) (string, error) {
 	out, err := i.process([]string{"XDG_CONFIG_HOME=" + configHome}, "profiles").CombinedOutput()
-	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) {
-		return strings.TrimSpace(string(out)), nil
+	text := strings.TrimSpace(string(out))
+	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) && exit.ExitCode() == 1 && strings.HasPrefix(text, "process: ") {
+		return text, nil
 	}
-	return "", err
+	if err != nil {
+		return "", fmt.Errorf("process profiles: %w: %s", err, text)
+	}
+	return "", nil
+}
+
+// checkExample makes sure the checkout's process accepts the example profile proc fills in. A checkout older or newer
+// than proc's copy of it may not, and then no answer would.
+func (i *initializer) checkExample() error {
+	scratch, err := os.MkdirTemp("", "proc-init-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(scratch)
+	file := filepath.Join(scratch, "process", "profiles", "acme.md")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(file, []byte(exampleProfile), 0o644); err != nil {
+		return err
+	}
+	problem, err := i.check(scratch)
+	if err != nil || problem == "" {
+		return err
+	}
+	return fmt.Errorf("the checkout's process refuses proc's example profile; git pull the checkout, or update proc:\n%s", problem)
 }
 
 var profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -420,29 +473,32 @@ func (i *initializer) ask(groups ...*huh.Group) error {
 	return nil
 }
 
-func (i *initializer) expand(path string) string {
-	if rest, ok := strings.CutPrefix(path, "~"); ok && (rest == "" || rest[0] == '/') {
+func (i *initializer) expand(file string) string {
+	if rest, ok := strings.CutPrefix(file, "~"); ok && (rest == "" || rest[0] == '/') {
 		return i.home + rest
 	}
-	return path
+	return file
 }
 
 // lineReader hands out one line per Read. huh's accessible prompts each read through a new bufio.Scanner, which would
 // otherwise swallow the answers to the prompts after it.
 type lineReader struct {
-	r   *bufio.Reader
-	eof bool
+	r       *bufio.Reader
+	eof     bool // a prompt found no answer left
+	midLine bool // the last Read ended before a newline
 }
 
 func (l *lineReader) Read(p []byte) (int, error) {
 	n := 0
 	for n < len(p) {
 		b, err := l.r.ReadByte()
+		if err != nil && n > 0 {
+			l.midLine = true
+			return n, nil
+		}
 		if err != nil {
-			l.eof = true
-			if n > 0 {
-				return n, nil
-			}
+			// The end of a last answer without its newline is still an answer; the end at a new prompt is not.
+			l.eof, l.midLine = !l.midLine, false
 			return 0, err
 		}
 		p[n] = b
@@ -451,6 +507,7 @@ func (l *lineReader) Read(p []byte) (int, error) {
 			break
 		}
 	}
+	l.midLine = n > 0 && p[n-1] != '\n'
 	return n, nil
 }
 
@@ -462,7 +519,7 @@ func renderProfile(a answers, now time.Time) (string, error) {
 		return "", errors.New("the example profile has no +++ front matter")
 	}
 	values := map[string]any{
-		".name": a.name, ".active": true, ".workdir": a.workdir, ".timezone": a.timezone, ".sources": a.sources,
+		".name": a.name, ".active": true, ".workdir": a.workdir, ".timezone": a.timezone, ".sources": append([]string{}, a.sources...), // [], not null, when I chose none
 		"github.repo": a.repo, "linear.team": a.team,
 		"slack.workspace": a.workspace, "slack.watchlist": split(a.watchlist),
 		"google.account": a.account, "google.manager": a.manager, "google.noise_label": a.noiseLabel,
@@ -497,8 +554,10 @@ func renderProfile(a answers, now time.Time) (string, error) {
 			continue
 		}
 		delete(values, table+"."+key)
-		for strings.Count(lines[n], "[") > strings.Count(lines[n], "]") && n+1 < len(lines) { // a multi-line array
+		depth := strings.Count(lines[n], "[") - strings.Count(lines[n], "]")
+		for depth > 0 && n+1 < len(lines) { // a multi-line array
 			n++
+			depth += strings.Count(lines[n], "[") - strings.Count(lines[n], "]")
 		}
 		if value == "" && key == "timezone" {
 			out = append(out, line)
@@ -511,7 +570,10 @@ func renderProfile(a answers, now time.Time) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		out = append(out, key+" = "+strings.ReplaceAll(string(data), `","`, `", "`))
+		if _, list := value.([]string); list {
+			data = []byte(strings.ReplaceAll(string(data), `","`, `", "`))
+		}
+		out = append(out, key+" = "+string(data))
 	}
 	for key := range values {
 		if table, _, _ := strings.Cut(key, "."); !unused[table] {
