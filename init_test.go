@@ -327,3 +327,35 @@ func TestTheDryRunUsesAScratchStateDirectoryShowsTheBriefAndRemovesIt(t *testing
 		t.Errorf("the scratch state directory is still there: %v", err)
 	}
 }
+
+func TestInitEndsWithWhatTheLiveRunNeedsThenProcInstall(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	_, next, _ := strings.Cut(out.String(), "proc: wrote")
+	for _, want := range []string{"modify scope", `"Noise"`, "~/code/widgets/.mcp.json", "proc install"} {
+		if !strings.Contains(next, want) {
+			t.Errorf("the next steps do not mention %s:\n%s", want, next)
+		}
+	}
+	if strings.Contains(next, "not on your PATH") {
+		t.Errorf("warned about PATH, which holds ~/.local/bin:\n%s", next)
+	}
+
+	out.Reset()
+	i.path = "/usr/bin:/bin"
+	answer(i, "gadgets", "", "2", "3", "4", "5", "6", "0", "acme/gadgets", "", "", "", "", "", "", "n")
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	_, next, _ = strings.Cut(out.String(), "proc: wrote")
+	if strings.Contains(next, "Gmail") {
+		t.Errorf("a GitHub-only profile's next steps mention Gmail:\n%s", next)
+	}
+	if !strings.Contains(out.String(), filepath.Join(i.home, ".local/bin")+" is not on your PATH") {
+		t.Errorf("did not warn that process is not on PATH:\n%s", out)
+	}
+}

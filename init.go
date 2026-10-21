@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -94,11 +95,29 @@ func (i *initializer) init() error {
 	if err := i.installPipeline(checkout); err != nil {
 		return err
 	}
-	name, err := i.createProfile()
+	a, err := i.createProfile()
 	if err != nil {
 		return err
 	}
-	return i.dryRun(checkout, name)
+	if err := i.dryRun(checkout, a.name); err != nil {
+		return err
+	}
+	i.nextSteps(a)
+	return nil
+}
+
+// nextSteps names what a live run of the profile needs that proc cannot set up, then proc install.
+func (i *initializer) nextSteps(a answers) {
+	fmt.Fprintln(i.out, "proc: before a live run:")
+	if slices.Contains(a.sources, "gmail") {
+		fmt.Fprintln(i.out, "  - connect Gmail with modify scope: triage archives noise")
+		if a.noiseLabel != "" {
+			fmt.Fprintf(i.out, "  - create the %q label in Gmail: triage files noise under it, and cannot create it\n", a.noiseLabel)
+		}
+	}
+	// triage, next-work and the executor read Linear whatever the sources.
+	fmt.Fprintf(i.out, "  - add the Linear MCP server (linear-server) to %s\n", path.Join(a.workdir, ".mcp.json"))
+	fmt.Fprintln(i.out, "proc: then run proc install to sweep on a timer")
 }
 
 // checkout is my claude-skills checkout: the one I named last time, else where I say it is, remembered for next time.
@@ -152,7 +171,14 @@ func (i *initializer) installPipeline(checkout string) error {
 			return err
 		}
 	}
-	return i.link(filepath.Join(skillsDir, "process", "process.py"), filepath.Join(i.home, ".local", "bin", "process"))
+	bin := filepath.Join(i.home, ".local", "bin")
+	if err := i.link(filepath.Join(skillsDir, "process", "process.py"), filepath.Join(bin, "process")); err != nil {
+		return err
+	}
+	if !slices.Contains(filepath.SplitList(i.path), bin) {
+		fmt.Fprintf(i.out, "proc: warning: %s is not on your PATH; add it, or process and the timed runs will not be found\n", bin)
+	}
+	return nil
 }
 
 // link makes path a symlink to target, unless it is one already. Anything else at path stays: it may be a copy I made
@@ -186,8 +212,8 @@ type answers struct {
 
 var sources = []string{"github", "linear", "slack", "gmail", "calendar", "meetings"}
 
-// createProfile asks for a project's values and writes its profile from the example's, returning its name.
-func (i *initializer) createProfile() (string, error) {
+// createProfile asks for a project's values and writes its profile from the example's.
+func (i *initializer) createProfile() (answers, error) {
 	a := answers{sources: sources, noiseLabel: "Noise", timezone: i.zone}
 	name := huh.NewInput().Title("Project name").Value(&a.name).Validate(func(s string) error {
 		if !profileName.MatchString(s) {
@@ -198,7 +224,7 @@ func (i *initializer) createProfile() (string, error) {
 	path := ""
 	for replace := false; !replace; {
 		if err := i.ask(huh.NewGroup(name)); err != nil {
-			return "", err
+			return a, err
 		}
 		path = filepath.Join(i.configHome, "process", "profiles", a.name+".md")
 		if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -206,14 +232,14 @@ func (i *initializer) createProfile() (string, error) {
 		}
 		confirm := huh.NewConfirm().Title(fmt.Sprintf("%s already exists. Replace it?", path)).Value(&replace)
 		if err := i.ask(huh.NewGroup(confirm)); err != nil {
-			return "", err
+			return a, err
 		}
 	}
 	a.workdir = "~/code/" + a.name
 	// The profile waits in a scratch config directory until process accepts it: no invalid profile reaches mine.
 	scratch, err := os.MkdirTemp("", "proc-init-")
 	if err != nil {
-		return "", err
+		return a, err
 	}
 	defer os.RemoveAll(scratch)
 	draft := filepath.Join(scratch, "process", "profiles", a.name+".md")
@@ -222,24 +248,24 @@ func (i *initializer) createProfile() (string, error) {
 			huh.NewInput().Title("Workdir: headless phases run here, so its .mcp.json servers load").Value(&a.workdir),
 			huh.NewMultiSelect[string]().Title("Sources").Options(huh.NewOptions(sources...)...).Value(&a.sources),
 		)); err != nil {
-			return "", err
+			return a, err
 		}
 		if err := i.ask(i.questions(&a)...); err != nil {
-			return "", err
+			return a, err
 		}
 		text, err := renderProfile(a, i.now())
 		if err != nil {
-			return "", err
+			return a, err
 		}
 		if err := os.MkdirAll(filepath.Dir(draft), 0o755); err != nil {
-			return "", err
+			return a, err
 		}
 		if err := os.WriteFile(draft, []byte(text), 0o644); err != nil {
-			return "", err
+			return a, err
 		}
 		problem, err := i.check(scratch)
 		if err != nil {
-			return "", err
+			return a, err
 		}
 		if problem == "" {
 			break
@@ -249,11 +275,11 @@ func (i *initializer) createProfile() (string, error) {
 	for {
 		fmt.Fprintln(i.out, "proc: opening the profile in $EDITOR for a final look")
 		if err := i.editor(draft); err != nil {
-			return "", fmt.Errorf("the editor failed (%w); %s was not written", err, path)
+			return a, fmt.Errorf("the editor failed (%w); %s was not written", err, path)
 		}
 		problem, err := i.check(scratch)
 		if err != nil {
-			return "", err
+			return a, err
 		}
 		if problem == "" {
 			break
@@ -262,16 +288,16 @@ func (i *initializer) createProfile() (string, error) {
 	}
 	text, err := os.ReadFile(draft)
 	if err != nil {
-		return "", err
+		return a, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", err
+		return a, err
 	}
 	if err := os.WriteFile(path, text, 0o644); err != nil {
-		return "", err
+		return a, err
 	}
 	fmt.Fprintln(i.out, "proc: wrote", path)
-	return a.name, nil
+	return a, nil
 }
 
 // process runs the process CLI proc init put on PATH, as the shell will, whether or not PATH has it yet: its headless
