@@ -169,14 +169,26 @@ func (i *initializer) installPipeline(checkout string) error {
 		skills = append(skills, filepath.Base(dir))
 	}
 	skillsDir := filepath.Join(i.home, ".claude", "skills")
+	var already []string
 	for _, skill := range skills {
-		if err := i.link(filepath.Join(checkout, skill), filepath.Join(skillsDir, skill)); err != nil {
+		done, err := i.link(filepath.Join(checkout, skill), filepath.Join(skillsDir, skill))
+		if err != nil {
 			return err
+		}
+		if done {
+			already = append(already, skill)
 		}
 	}
 	bin := filepath.Join(i.home, ".local", "bin")
-	if err := i.link(filepath.Join(skillsDir, "process", "process.py"), filepath.Join(bin, "process")); err != nil {
+	done, err := i.link(filepath.Join(skillsDir, "process", "process.py"), filepath.Join(bin, "process"))
+	if err != nil {
 		return err
+	}
+	if done {
+		already = append(already, filepath.Join(bin, "process"))
+	}
+	if len(already) > 0 {
+		fmt.Fprintln(i.out, "proc: already linked:", strings.Join(already, ", "))
 	}
 	if !slices.Contains(filepath.SplitList(i.path), bin) {
 		fmt.Fprintf(i.out, "proc: warning: %s is not on your PATH; add it, or process and the timed runs will not be found\n", bin)
@@ -184,24 +196,23 @@ func (i *initializer) installPipeline(checkout string) error {
 	return nil
 }
 
-// link makes path a symlink to target, unless it is one already. Anything else at path stays: it may be a copy I made
-// by hand, and it is mine to remove.
-func (i *initializer) link(target, path string) error {
+// link makes path a symlink to target, unless it is one already (done). Anything else at path stays: it may be a copy
+// I made by hand, and it is mine to remove.
+func (i *initializer) link(target, path string) (done bool, err error) {
 	if current, err := os.Readlink(path); err == nil && current == target {
-		fmt.Fprintf(i.out, "proc: already linked: %s\n", path)
-		return nil
+		return true, nil
 	} else if _, err := os.Lstat(path); err == nil {
 		fmt.Fprintf(i.out, "proc: left %s as it is; remove it and run proc init again to link it to %s\n", path, target)
-		return nil
+		return false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return false, err
 	}
 	if err := os.Symlink(target, path); err != nil {
-		return err
+		return false, err
 	}
 	fmt.Fprintf(i.out, "proc: linked %s -> %s\n", path, target)
-	return nil
+	return false, nil
 }
 
 // answers are what differs per project; every list is comma-separated.

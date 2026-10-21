@@ -389,3 +389,19 @@ func TestInitWritesAProfileTheRealProcessAccepts(t *testing.T) {
 		t.Fatalf("process refuses the written profile: %v %s", err, problem)
 	}
 }
+
+func TestInitLeavesASkillICopiedByHandAndSaysSo(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	write(i.home, ".claude/skills/brief/SKILL.md", "my copy\n")
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := read(t, i.home, ".claude/skills/brief/SKILL.md"); got != "my copy\n" {
+		t.Errorf("replaced my copy of brief: %q", got)
+	}
+	if !strings.Contains(out.String(), "left "+filepath.Join(i.home, ".claude/skills/brief")+" as it is") {
+		t.Errorf("did not say it left brief alone:\n%s", out)
+	}
+}
