@@ -7,6 +7,25 @@ go build        # writes ./proc
 go install .    # or put it on PATH as ~/go/bin/proc
 ```
 
+## Getting started
+
+```bash
+proc init         # first: install the process pipeline and write a project profile; run it again per project
+proc install      # then: run it unattended (see below)
+```
+
+`proc init` takes a fresh machine to a valid, active profile:
+
+1. **Installs the pipeline.** It asks where your [claude-skills](https://github.com/JohnnyMcGee/claude-skills) checkout is (once: it remembers the answer in `~/.config/proc/claude-skills`), symlinks its process skills (`brief`, `execute`, `next-work`, `process`, `triage` and every `sweep-*`) into `~/.claude/skills/`, so a `git pull` in the checkout upgrades them, and links `process` into `~/.local/bin/`. It skips what is already linked and leaves anything else it finds there alone, saying so.
+2. **Writes a profile.** It asks for the project name, then only what differs per project: the workdir, sources, GitHub repo, Linear team, Slack workspace and watchlist, Google account, manager and noise label, `[match]` rules and `[urgency]` people, channels and labels. It fills these into the example profile, keeping its phases, models and allowlists, and opens the result in `$EDITOR` for a final look. It asks before replacing a profile that exists.
+3. **Validates.** The profile waits in a scratch directory until `process profiles` accepts it. When process refuses an answer, `proc init` shows the error and asks again; when it refuses an edit, the editor opens again. Only an accepted profile reaches `~/.config/process/profiles/<name>.md`.
+4. **Offers a dry run.** `process run --fixtures` of the new profile on claude-skills' fixtures, in a scratch `XDG_STATE_HOME` that it removes afterwards. It shows the brief first. No service is called, but each phase runs as headless Claude.
+5. **Says what's next.** These are the live-run prerequisites proc cannot set up (Gmail's modify scope, the noise label, the Linear MCP server in the workdir's `.mcp.json`), then `proc install`.
+
+The questions are [huh](https://github.com/charmbracelet/huh) forms. In the checkout and workdir questions, tab completes the directory being typed, and up and down choose among the matches. With `ACCESSIBLE` set, or answers piped in, they are plain prompts that read one answer per line. With piped answers there is no terminal for `$EDITOR`, so the profile is written without the final look, and `proc init` says where it is. Before asking anything, `proc init` checks that the checkout's `process` accepts proc's copy of the example profile. If it does not, pull the checkout or update proc.
+
+The example profile is claude-skills' `process/profiles/acme.md`, vendored unchanged as `profiles/acme.md`. When it changes there, copy it over.
+
 ## Working the queue
 
 `proc` lists the entries waiting on you in the approval queue, grouped by project and then by urgency (`!` is urgent). FYI and superseded entries stay out; entries you decided stay for a week with their result.
@@ -39,7 +58,7 @@ proc uninstall    # removes both; safe to run twice
 
 ## The state directory
 
-Apart from what `proc install` puts in place, proc reads and writes only `$XDG_STATE_HOME/process/` (default `~/.local/state/process/`), which claude-skills' process pipeline owns. It holds no credentials and calls no service API: `proc sweep` leaves that to `process run`.
+Apart from what `proc init` and `proc install` put in place, proc reads and writes only `$XDG_STATE_HOME/process/` (default `~/.local/state/process/`), which claude-skills' process pipeline owns. It holds no credentials and calls no service API: `proc sweep` leaves that to `process run`.
 
 - reads `queue.jsonl` (triage's queue entries; the last line per id wins), `profiles/<project>/items.jsonl` (the context of each entry's items) and `results.jsonl` (the executor's outcome per entry);
 - appends `decisions.jsonl`, one decision per entry, each validated against the shared schema first;
@@ -63,5 +82,7 @@ PATH="$tmp/bin:$PATH" XDG_STATE_HOME="$tmp/state" XDG_CONFIG_HOME="$tmp/config" 
 cp "$tmp"/state/process/{queue,results}.jsonl testdata/urgency/process/
 cp "$tmp/state/process/profiles/acme/items.jsonl" testdata/urgency/process/profiles/acme/
 ```
+
+`proc init`'s tests answer its prompts over a scratch home and a stub claude-skills checkout. To run them against a real checkout's `process` CLI too, set `PROC_CLAUDE_SKILLS` to its path.
 
 CI runs gofmt, `go vet`, `go test` and `go build` on every PR.

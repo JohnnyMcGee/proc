@@ -47,7 +47,7 @@ func run() error {
 	return nil
 }
 
-const usage = "usage: proc [count | notify | sweep [--delta] | install | uninstall]"
+const usage = "usage: proc [init | count | notify | sweep [--delta] | install | uninstall]"
 
 // command runs one of proc's unattended subcommands; with none, proc is the TUI.
 func command(root, name string, args []string) error {
@@ -65,6 +65,12 @@ func command(root, name string, args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 		defer stop()
 		return sweep(ctx, root, len(args) == 1, time.Now(), runProcess, notifySend)
+	case name == "init" && len(args) == 0:
+		i, err := newInitializer()
+		if err != nil {
+			return err
+		}
+		return i.init()
 	case name == "install" && len(args) == 0:
 		i, err := newInstaller()
 		if err != nil {

@@ -1,0 +1,608 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/BurntSushi/toml"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
+)
+
+// fakeCheckout is a claude-skills checkout holding every process skill and a process CLI that records each call in
+// log. Its `profiles` refuses a profile with a channel that lacks its #, as the real one does; its `run` writes a
+// brief to the state directory it was given.
+func fakeCheckout(t *testing.T) (dir, log string) {
+	t.Helper()
+	dir, log = t.TempDir(), filepath.Join(t.TempDir(), "process.log")
+	for _, skill := range []string{"brief", "execute", "next-work", "triage", "sweep-github", "sweep-slack", "afk"} {
+		write(dir, skill+"/SKILL.md", "# "+skill+"\n")
+	}
+	write(dir, "process/process.py", `#!/bin/sh
+echo "$*" >> `+log+`
+case "$1" in
+profiles)
+	for f in "$XDG_CONFIG_HOME"/process/profiles/*.md; do
+		if grep -Eq '^(channels|watchlist) = .*[[,] *"[^#]' "$f"; then
+			printf 'process: profile %s:\n  $.urgency.channels[0]: does not match ^#\n' "$f"
+			exit 1
+		fi
+	done
+	echo "profiles ok";;
+run)
+	echo "state $XDG_STATE_HOME" >> `+log+`
+	mkdir -p "$XDG_STATE_HOME/process"
+	echo "# The dry-run brief" > "$XDG_STATE_HOME/process/brief.md";;
+esac
+`)
+	if err := os.Chmod(filepath.Join(dir, "process/process.py"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir, log
+}
+
+// setupInit is `proc init` over a scratch home, answering from the lines given to answer and opening no editor.
+func setupInit(t *testing.T) (*initializer, *bytes.Buffer) {
+	t.Helper()
+	home := t.TempDir()
+	out := &bytes.Buffer{}
+	return &initializer{
+		home:       home,
+		configHome: filepath.Join(home, ".config"),
+		path:       filepath.Join(home, ".local/bin") + ":/usr/bin:/bin",
+		out:        out,
+		accessible: true,
+		editor:     func(string) error { return nil },
+		now:        func() time.Time { return now },
+		zone:       "America/Chicago",
+	}, out
+}
+
+func answer(i *initializer, lines ...string) {
+	i.in = strings.NewReader(strings.Join(lines, "\n") + "\n")
+}
+
+// widgets answers every question for a profile named widgets on all six sources, and declines the dry run.
+func widgets(checkout string) []string {
+	return []string{
+		checkout,
+		"widgets", "", "0", // name, workdir (~/code/widgets), sources (all six; 0 confirms)
+		"acme/widgets", "WID", "acme", "#incidents, #deploys", "me@acme.example", "mo@acme.example", "",
+		"widgets", "#widgets", "@acme.example", // match
+		"Mo, mo-acme", "#incidents, #incident-*", "deploy-blocking", // urgency
+		"n", // no dry run
+	}
+}
+
+func profile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	parts := strings.SplitN(text, "+++\n", 3)
+	if len(parts) != 3 {
+		t.Fatalf("%s has no +++ front matter:\n%s", path, text)
+	}
+	var p map[string]any
+	if _, err := toml.Decode(parts[1], &p); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return p
+}
+
+func TestInitOnAFreshHomeLinksTheSkillsInstallsProcessAndWritesTheProfile(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	for _, skill := range []string{"brief", "execute", "next-work", "process", "triage", "sweep-github", "sweep-slack"} {
+		link := filepath.Join(i.home, ".claude/skills", skill)
+		if target, err := os.Readlink(link); err != nil || target != filepath.Join(checkout, skill) {
+			t.Errorf("%s -> %q (%v), want a link to the checkout's %s", link, target, err, skill)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(i.home, ".claude/skills/afk")); !os.IsNotExist(err) {
+		t.Errorf("linked afk, which is not a process skill: %v", err)
+	}
+	process := filepath.Join(i.home, ".local/bin/process")
+	if resolved, err := filepath.EvalSymlinks(process); err != nil || resolved != filepath.Join(checkout, "process/process.py") {
+		t.Errorf("%s resolves to %q (%v), want the checkout's process.py", process, resolved, err)
+	}
+
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	want := map[string]any{
+		"name": "widgets", "active": true, "workdir": "~/code/widgets", "timezone": "America/Chicago",
+		"sources": []any{"github", "linear", "slack", "gmail", "calendar", "meetings"},
+		"github":  map[string]any{"repo": "acme/widgets", "review_skill": "/review"},
+		"linear":  map[string]any{"team": "WID"},
+		"slack":   map[string]any{"workspace": "acme", "watchlist": []any{"#incidents", "#deploys"}},
+		"google":  map[string]any{"account": "me@acme.example", "manager": "mo@acme.example", "noise_label": "Noise"},
+		"match":   map[string]any{"keywords": []any{"widgets"}, "channels": []any{"#widgets"}, "senders": []any{"@acme.example"}},
+		"urgency": map[string]any{"people": []any{"Mo", "mo-acme"}, "channels": []any{"#incidents", "#incident-*"}, "labels": []any{"deploy-blocking"}},
+	}
+	for key, value := range want {
+		if !reflect.DeepEqual(got[key], value) {
+			t.Errorf("%s = %#v, want %#v", key, got[key], value)
+		}
+	}
+	if text := read(t, i.home, ".config/process/profiles/widgets.md"); strings.Contains(text, "An example profile") {
+		t.Errorf("the profile still calls itself the example:\n%s", text)
+	}
+	example := profile(t, "profiles/acme.md")
+	for _, key := range []string{"phases", "autonomy", "afk"} {
+		if !reflect.DeepEqual(got[key], example[key]) {
+			t.Errorf("%s differs from the example profile's:\n got %#v\nwant %#v", key, got[key], example[key])
+		}
+	}
+}
+
+// tree is every file under dir with its content, and every link with its target.
+func tree(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil || d.IsDir():
+		case d.Type()&os.ModeSymlink != 0:
+			files[path], err = os.Readlink(path)
+			files[path] = "-> " + files[path]
+		default:
+			files[path] = read(t, "/", path)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestASecondInitRemembersTheCheckoutSkipsTheInstallAndAddsAProfile(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	before := tree(t, i.home)
+	out.Reset()
+	answer(i, // no checkout: it is remembered
+		"gadgets", "", "3", "4", "5", "6", "0", // github and linear only
+		"acme/gadgets", "GAD", "", "", "", "", "", "",
+		"n",
+	)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "proc: linked") || !strings.Contains(out.String(), "already linked") {
+		t.Errorf("want every install step reported as already done:\n%s", out)
+	}
+	after := tree(t, i.home)
+	for path, text := range before {
+		if after[path] != text {
+			t.Errorf("the second init changed %s", path)
+		}
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/gadgets.md"))
+	if got["name"] != "gadgets" || !reflect.DeepEqual(got["sources"], []any{"github", "linear"}) || got["slack"] != nil || got["google"] != nil {
+		t.Errorf("gadgets profile = %#v", got)
+	}
+}
+
+func TestAnAnswerProcessRefusesShowsItsErrorAndAsksAgain(t *testing.T) {
+	i, out := setupInit(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	checkout, _ := fakeCheckout(t)
+	lines := widgets(checkout)
+	lines[15] = "incidents" // urgency channels, without the #
+	lines = append(lines[:len(lines)-1],
+		"", "0", "", "", "", "", "", "", "", "", "", "", "", // the same answers again, but for
+		"#incidents", // the urgency channels
+		"",
+		"n",
+	)
+	answer(i, lines...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "$.urgency.channels[0]: does not match ^#") {
+		t.Errorf("did not show process profiles' error:\n%s", out)
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	want := map[string]any{"people": []any{"Mo", "mo-acme"}, "channels": []any{"#incidents"}, "labels": []any{"deploy-blocking"}}
+	if !reflect.DeepEqual(got["urgency"], want) {
+		t.Errorf("urgency = %#v, want %#v", got["urgency"], want)
+	}
+	if scratch, _ := os.ReadDir(os.Getenv("TMPDIR")); len(scratch) > 0 {
+		t.Errorf("left %v behind in TMPDIR", scratch)
+	}
+}
+
+func TestStoppingAfterARefusedAnswerLeavesNoProfile(t *testing.T) {
+	i, out := setupInit(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	checkout, _ := fakeCheckout(t)
+	lines := widgets(checkout)
+	lines[15] = "incidents"
+	answer(i, lines[:len(lines)-1]...)
+	if err := i.init(); err == nil {
+		t.Fatalf("want init to stop when the answers run out\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(i.home, ".config/process/profiles/widgets.md")); !os.IsNotExist(err) {
+		t.Errorf("an invalid profile is on disk: %v", err)
+	}
+	if scratch, _ := os.ReadDir(os.Getenv("TMPDIR")); len(scratch) > 0 {
+		t.Errorf("left %v behind in TMPDIR", scratch)
+	}
+}
+
+func TestInitAsksBeforeReplacingAProfileAndKeepsItWhenToldTo(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	write(i.home, ".config/process/profiles/widgets.md", "my own profile\n")
+	lines := widgets(checkout)
+	answer(i, append([]string{checkout, "widgets", "n", "gizmos"}, lines[2:]...)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := read(t, i.home, ".config/process/profiles/widgets.md"); got != "my own profile\n" {
+		t.Errorf("widgets.md was replaced:\n%s", got)
+	}
+	if got := profile(t, filepath.Join(i.home, ".config/process/profiles/gizmos.md")); got["name"] != "gizmos" {
+		t.Errorf("gizmos profile = %#v", got)
+	}
+}
+
+func TestTheProfileOpensInTheEditorAndAnEditProcessRefusesOpensItAgain(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	edits := []func(string) string{
+		func(text string) string {
+			return strings.Replace(text, `labels = ["deploy-blocking"]`, `channels = ["incidents"]`, 1)
+		},
+		func(text string) string {
+			return strings.Replace(text, `channels = ["incidents"]`, `labels = ["deploy-blocking", "hotfix"]`, 1)
+		},
+	}
+	var opened []string
+	i.editor = func(path string) error {
+		opened = append(opened, path)
+		if len(opened) > len(edits) {
+			t.Fatalf("opened the editor a %d time", len(opened))
+		}
+		write("/", path, edits[len(opened)-1](read(t, "/", path)))
+		return nil
+	}
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if len(opened) != 2 {
+		t.Fatalf("opened the editor %d times, want twice: once, then again after the edit process refused", len(opened))
+	}
+	if !strings.Contains(out.String(), "does not match ^#") {
+		t.Errorf("did not show process profiles' error:\n%s", out)
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	if want := []any{"deploy-blocking", "hotfix"}; !reflect.DeepEqual(got["urgency"].(map[string]any)["labels"], want) {
+		t.Errorf("urgency = %#v, want the edited labels %q", got["urgency"], want)
+	}
+}
+
+func TestTheDryRunUsesAScratchStateDirectoryShowsTheBriefAndRemovesIt(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, log := fakeCheckout(t)
+	lines := widgets(checkout)
+	lines[len(lines)-1] = "y"
+	answer(i, lines...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	calls := strings.Split(strings.TrimSpace(read(t, "/", log)), "\n")
+	if want := "run --fixtures " + filepath.Join(checkout, "process/fixtures") + " --project widgets"; !slices.Contains(calls, want) {
+		t.Fatalf("did not run %q; process ran %q", want, calls)
+	}
+	var state string
+	for _, call := range calls {
+		if dir, ok := strings.CutPrefix(call, "state "); ok {
+			state = dir
+		}
+	}
+	if state == "" || strings.HasPrefix(state, i.home) || strings.HasPrefix(state, filepath.Join(os.Getenv("HOME"), ".local", "state")) {
+		t.Fatalf("the dry run's XDG_STATE_HOME = %q, want a scratch directory", state)
+	}
+	brief := filepath.Join(state, "process", "brief.md")
+	if !strings.Contains(out.String(), brief) || !strings.Contains(out.String(), "# The dry-run brief") {
+		t.Errorf("did not show the brief or where it is:\n%s", out)
+	}
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Errorf("the scratch state directory is still there: %v", err)
+	}
+}
+
+func TestInitEndsWithWhatTheLiveRunNeedsThenProcInstall(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	_, next, _ := strings.Cut(out.String(), "proc: wrote")
+	for _, want := range []string{"modify scope", `"Noise"`, "~/code/widgets/.mcp.json", "proc install"} {
+		if !strings.Contains(next, want) {
+			t.Errorf("the next steps do not mention %s:\n%s", want, next)
+		}
+	}
+	if strings.Contains(next, "not on your PATH") {
+		t.Errorf("warned about PATH, which holds ~/.local/bin:\n%s", next)
+	}
+	if !strings.Contains(next, "~/code/widgets does not exist") {
+		t.Errorf("did not warn that the workdir is missing:\n%s", next)
+	}
+
+	out.Reset()
+	i.path = "/usr/bin:/bin"
+	write(i.home, "code/gadgets/README.md", "")
+	answer(i, "gadgets", "", "2", "3", "4", "5", "6", "0", "acme/gadgets", "", "", "", "", "", "", "n")
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	_, next, _ = strings.Cut(out.String(), "proc: wrote")
+	if strings.Contains(next, "does not exist") {
+		t.Errorf("warned about a workdir that exists:\n%s", next)
+	}
+	if strings.Contains(next, "Gmail") {
+		t.Errorf("a GitHub-only profile's next steps mention Gmail:\n%s", next)
+	}
+	if !strings.Contains(out.String(), filepath.Join(i.home, ".local/bin")+" is not on your PATH") {
+		t.Errorf("did not warn that process is not on PATH:\n%s", out)
+	}
+}
+
+// With PROC_CLAUDE_SKILLS naming a claude-skills checkout, proc init runs against its real process CLI: the vendored
+// example profile, filled in, must still be one that process accepts.
+func TestInitWritesAProfileTheRealProcessAccepts(t *testing.T) {
+	checkout := os.Getenv("PROC_CLAUDE_SKILLS")
+	if checkout == "" {
+		t.Skip("set PROC_CLAUDE_SKILLS to a claude-skills checkout to run proc init against its process CLI")
+	}
+	i, out := setupInit(t)
+	lines := widgets(checkout)
+	lines[15] = "incidents"
+	lines = append(lines[:len(lines)-1], "", "0", "", "", "", "", "", "", "", "", "", "", "", "#incidents", "", "n")
+	answer(i, lines...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "'incidents' does not match ^#") {
+		t.Errorf("did not show process profiles' error:\n%s", out)
+	}
+	if problem, err := i.check(i.configHome); err != nil || problem != "" {
+		t.Fatalf("process refuses the written profile: %v %s", err, problem)
+	}
+}
+
+func TestInitLeavesASkillICopiedByHandAndSaysSo(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	write(i.home, ".claude/skills/brief/SKILL.md", "my copy\n")
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if got := read(t, i.home, ".claude/skills/brief/SKILL.md"); got != "my copy\n" {
+		t.Errorf("replaced my copy of brief: %q", got)
+	}
+	if !strings.Contains(out.String(), "left "+filepath.Join(i.home, ".claude/skills/brief")+" as it is") {
+		t.Errorf("did not say it left brief alone:\n%s", out)
+	}
+}
+
+// stubProcess replaces the fake checkout's process CLI with a script.
+func stubProcess(t *testing.T, checkout, script string) {
+	t.Helper()
+	write(checkout, "process/process.py", "#!/bin/sh\n"+script)
+}
+
+func TestTheNameProcessReservesIsRefusedAsItIsTyped(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	lines := widgets(checkout)
+	answer(i, append([]string{checkout, "unsorted"}, lines[1:]...)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "reserved") {
+		t.Errorf("did not refuse the name unsorted:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(i.home, ".config/process/profiles/widgets.md")); err != nil {
+		t.Errorf("did not go on to the next name: %v", err)
+	}
+}
+
+func TestALastAnswerWithoutANewlineStillCounts(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	i.in = strings.NewReader(strings.Join(widgets(checkout), "\n"))
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "proc install") {
+		t.Errorf("did not finish:\n%s", out)
+	}
+}
+
+func TestAProcessThatCannotRunStopsInitInsteadOfAskingAgain(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	stubProcess(t, checkout, "echo 'env: python3: No such file or directory' >&2\nexit 127\n")
+	answer(i, widgets(checkout)...)
+	err := i.init()
+	if err == nil || !strings.Contains(err.Error(), "python3") {
+		t.Fatalf("want process' failure as the error, got %v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "answer again") {
+		t.Errorf("asked again although no answer could help:\n%s", out)
+	}
+}
+
+func TestACheckoutWhoseProcessRefusesTheExampleProfileIsReportedBeforeAnyQuestion(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	stubProcess(t, checkout, "echo \"process: profile $XDG_CONFIG_HOME/x.md:\"\necho \"  \\$: additional property 'afk'\"\nexit 1\n")
+	answer(i, checkout)
+	err := i.init()
+	if err == nil || !strings.Contains(err.Error(), "git pull") || !strings.Contains(err.Error(), "additional property 'afk'") {
+		t.Fatalf("want an error saying the checkout is too old, got %v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "Project name") {
+		t.Errorf("asked questions no answer could get past:\n%s", out)
+	}
+}
+
+func TestWithoutAnEditorTheProfileIsWrittenAndISeeWhereToEditIt(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	i.editor = nil // the answers come from a pipe: no terminal for one
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	path := filepath.Join(i.home, ".config/process/profiles/widgets.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "no editor") || !strings.Contains(out.String(), path) {
+		t.Errorf("did not say the editor was skipped and where the profile is:\n%s", out)
+	}
+}
+
+func TestAnExampleWithMultiLineArraysIsFilledInWhole(t *testing.T) {
+	saved := exampleProfile
+	t.Cleanup(func() { exampleProfile = saved })
+	exampleProfile = strings.Replace(exampleProfile, `watchlist = ["#incidents", "#deploys"]`, "watchlist = [\n  \"#incidents\",\n  [\"#nested\"],\n  \"#deploys\",\n]", 1)
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	if want := []any{"#incidents", "#deploys"}; !reflect.DeepEqual(got["slack"].(map[string]any)["watchlist"], want) {
+		t.Errorf("watchlist = %#v, want %#v", got["slack"], want)
+	}
+}
+
+func TestNoSourcesIsAnswerProcessRefusesNotBrokenTOML(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	stubProcess(t, checkout, `for f in "$XDG_CONFIG_HOME"/process/profiles/*.md; do
+	grep -q '^sources = \[\]' "$f" && { echo "process: profile $f:"; echo "  \$.sources: fewer than 1 items"; exit 1; }
+	grep -q '^sources = \[' "$f" || { echo "process: $f: invalid TOML"; exit 1; }
+done
+exit 0
+`)
+	lines := widgets(checkout)
+	answer(i, append(append(lines[:3:3], "1", "2", "3", "4", "5", "6", "0", "", "", "", "", "", "", "", "", "", "", "", "", "", "1", "0"), lines[4:]...)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "fewer than 1 items") {
+		t.Errorf("did not show process' error for no sources:\n%s", out)
+	}
+}
+
+// settle feeds a form the messages its commands produce, as bubbletea would, dropping any that take longer than a
+// directory listing: the cursor's blink ticks forever, every half second.
+func settle(m tea.Model, cmd tea.Cmd) tea.Model {
+	if cmd == nil {
+		return m
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(250 * time.Millisecond):
+		return m
+	}
+	switch msg := msg.(type) {
+	case nil, tea.QuitMsg:
+	case tea.BatchMsg:
+		for _, c := range msg {
+			m = settle(m, c)
+		}
+	default:
+		m, cmd = m.Update(msg)
+		m = settle(m, cmd)
+	}
+	return m
+}
+
+func typeKeys(m tea.Model, keys ...string) tea.Model {
+	for _, k := range keys {
+		var msg tea.KeyMsg
+		if k == "tab" {
+			msg = tea.KeyMsg{Type: tea.KeyTab}
+		} else {
+			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+		}
+		var cmd tea.Cmd
+		m, cmd = m.Update(msg)
+		m = settle(m, cmd)
+	}
+	return m
+}
+
+func TestTabCompletesTheDirectoryBeingTypedInAPathField(t *testing.T) {
+	i, _ := setupInit(t)
+	write(i.home, "code/claude-skills/README.md", "")
+	write(i.home, "code/proc/README.md", "")
+	write(i.home, "code/claude.txt", "") // a file is never a completion
+	write(i.home, "coffee/beans", "")
+	var dir string
+	form := i.form(true, huh.NewGroup(i.pathInput("Where is your claude-skills checkout?", &dir)))
+	m := settle(form, form.Init())
+	for _, step := range []struct{ typed, want string }{
+		{"~/cod", "~/code/"},
+		{"cl", "~/code/claude-skills/"},
+	} {
+		m = typeKeys(m, append(strings.Split(step.typed, ""), "tab")...)
+		if dir != step.want {
+			t.Fatalf("typed %q then tab: %q, want %q", step.typed, dir, step.want)
+		}
+	}
+}
+
+func TestTabCompletesNothingThatIsNotThere(t *testing.T) {
+	i, _ := setupInit(t)
+	write(i.home, "code/proc/README.md", "") // no directories under it
+	for typed, want := range map[string]string{
+		"~/code/pr\tx\t": "~/code/proc/x", // typed past the last completion: tab leaves it as it is
+		"~/C\t":          "~/C",           // ~/Code does not exist, whatever the case of ~/code
+	} {
+		var dir string
+		form := i.form(true, huh.NewGroup(i.pathInput("Workdir", &dir)))
+		m := settle(form, form.Init())
+		for _, k := range strings.Split(strings.ReplaceAll(typed, "\t", "|tab|"), "|") {
+			if k == "tab" {
+				m = typeKeys(m, k)
+			} else {
+				m = typeKeys(m, strings.Split(k, "")...)
+			}
+		}
+		if dir != want {
+			t.Errorf("%q = %q, want %q", typed, dir, want)
+		}
+	}
+}
