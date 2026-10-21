@@ -522,8 +522,8 @@ exit 0
 	}
 }
 
-// settle feeds a form the messages its commands produce, as bubbletea would, dropping any that take more than a
-// moment: the cursor's blink ticks forever.
+// settle feeds a form the messages its commands produce, as bubbletea would, dropping any that take longer than a
+// directory listing: the cursor's blink ticks forever, every half second.
 func settle(m tea.Model, cmd tea.Cmd) tea.Model {
 	if cmd == nil {
 		return m
@@ -533,7 +533,7 @@ func settle(m tea.Model, cmd tea.Cmd) tea.Model {
 	var msg tea.Msg
 	select {
 	case msg = <-done:
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(250 * time.Millisecond):
 		return m
 	}
 	switch msg := msg.(type) {
@@ -549,7 +549,7 @@ func settle(m tea.Model, cmd tea.Cmd) tea.Model {
 	return m
 }
 
-func keys(m tea.Model, keys ...string) tea.Model {
+func typeKeys(m tea.Model, keys ...string) tea.Model {
 	for _, k := range keys {
 		var msg tea.KeyMsg
 		if k == "tab" {
@@ -577,9 +577,32 @@ func TestTabCompletesTheDirectoryBeingTypedInAPathField(t *testing.T) {
 		{"~/cod", "~/code/"},
 		{"cl", "~/code/claude-skills/"},
 	} {
-		m = keys(m, append(strings.Split(step.typed, ""), "tab")...)
+		m = typeKeys(m, append(strings.Split(step.typed, ""), "tab")...)
 		if dir != step.want {
 			t.Fatalf("typed %q then tab: %q, want %q", step.typed, dir, step.want)
+		}
+	}
+}
+
+func TestTabCompletesNothingThatIsNotThere(t *testing.T) {
+	i, _ := setupInit(t)
+	write(i.home, "code/proc/README.md", "") // no directories under it
+	for typed, want := range map[string]string{
+		"~/code/pr\tx\t": "~/code/proc/x", // typed past the last completion: tab leaves it as it is
+		"~/C\t":          "~/C",           // ~/Code does not exist, whatever the case of ~/code
+	} {
+		var dir string
+		form := i.form(true, huh.NewGroup(i.pathInput("Workdir", &dir)))
+		m := settle(form, form.Init())
+		for _, k := range strings.Split(strings.ReplaceAll(typed, "\t", "|tab|"), "|") {
+			if k == "tab" {
+				m = typeKeys(m, k)
+			} else {
+				m = typeKeys(m, strings.Split(k, "")...)
+			}
+		}
+		if dir != want {
+			t.Errorf("%q = %q, want %q", typed, dir, want)
 		}
 	}
 }

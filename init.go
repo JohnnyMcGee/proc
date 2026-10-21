@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -493,7 +494,13 @@ func (i *initializer) run(form *huh.Form) error {
 
 // pathInput asks for a directory, suggesting the directories that complete what I have typed so far.
 func (i *initializer) pathInput(title string, value *string) *huh.Input {
-	return huh.NewInput().Title(title).Value(value).SuggestionsFunc(func() []string { return i.subdirs(*value) }, value)
+	return huh.NewInput().Title(title).Value(value).SuggestionsFunc(func() []string {
+		// huh hides an empty list but leaves the input matching the last one, which tab would then complete.
+		if dirs := i.subdirs(*value); len(dirs) > 0 {
+			return dirs
+		}
+		return []string{*value}
+	}, value)
 }
 
 // subdirs are the directories whose paths start with typed, written the way I typed it (~ and all).
@@ -503,7 +510,8 @@ func (i *initializer) subdirs(typed string) []string {
 	}
 	cut := strings.LastIndex(typed, "/") + 1
 	parent, prefix := typed[:cut], typed[cut:]
-	entries, err := os.ReadDir(cmp.Or(i.expand(parent), "."))
+	dir := cmp.Or(i.expand(parent), ".")
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
 	}
@@ -513,7 +521,12 @@ func (i *initializer) subdirs(typed string) []string {
 		if !strings.HasPrefix(name, prefix) || strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
 			continue
 		}
-		if info, err := os.Stat(filepath.Join(i.expand(parent), name)); err == nil && info.IsDir() { // links too
+		isDir := entry.IsDir()
+		if entry.Type()&fs.ModeSymlink != 0 { // a link to a directory completes too
+			info, err := os.Stat(filepath.Join(dir, name))
+			isDir = err == nil && info.IsDir()
+		}
+		if isDir {
 			dirs = append(dirs, parent+name+"/")
 		}
 	}
