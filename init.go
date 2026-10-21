@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -194,28 +195,71 @@ func (i *initializer) createProfile() error {
 		return err
 	}
 	a.workdir = "~/code/" + a.name
-	if err := i.ask(huh.NewGroup(
-		huh.NewInput().Title("Workdir: headless phases run here, so its .mcp.json servers load").Value(&a.workdir),
-		huh.NewMultiSelect[string]().Title("Sources").Options(huh.NewOptions(sources...)...).Value(&a.sources),
-	)); err != nil {
-		return err
-	}
-	if err := i.ask(i.questions(&a)...); err != nil {
-		return err
-	}
-	text, err := renderProfile(a, i.now())
+	// The profile waits in a scratch config directory until process accepts it: no invalid profile reaches mine.
+	scratch, err := os.MkdirTemp("", "proc-init-")
 	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(scratch)
+	draft := filepath.Join(scratch, "process", "profiles", a.name+".md")
 	path := filepath.Join(i.configHome, "process", "profiles", a.name+".md")
+	for {
+		if err := i.ask(huh.NewGroup(
+			huh.NewInput().Title("Workdir: headless phases run here, so its .mcp.json servers load").Value(&a.workdir),
+			huh.NewMultiSelect[string]().Title("Sources").Options(huh.NewOptions(sources...)...).Value(&a.sources),
+		)); err != nil {
+			return err
+		}
+		if err := i.ask(i.questions(&a)...); err != nil {
+			return err
+		}
+		text, err := renderProfile(a, i.now())
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(draft), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(draft, []byte(text), 0o644); err != nil {
+			return err
+		}
+		problem, err := i.check(scratch)
+		if err != nil {
+			return err
+		}
+		if problem == "" {
+			break
+		}
+		fmt.Fprintf(i.out, "%s\nproc: process refused the profile; answer again\n", strings.ReplaceAll(problem, draft, path))
+	}
+	text, err := os.ReadFile(draft)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+	if err := os.WriteFile(path, text, 0o644); err != nil {
 		return err
 	}
 	fmt.Fprintln(i.out, "proc: wrote", path)
 	return nil
+}
+
+// process runs the process CLI proc init put on PATH, as the shell will, whether or not PATH has it yet.
+func (i *initializer) process(env []string, args ...string) *exec.Cmd {
+	cmd := exec.Command(filepath.Join(i.home, ".local", "bin", "process"), args...)
+	cmd.Env = append(os.Environ(), env...)
+	return cmd
+}
+
+// check runs `process profiles` over the profiles in configHome, returning what it refuses, if anything.
+func (i *initializer) check(configHome string) (string, error) {
+	out, err := i.process([]string{"XDG_CONFIG_HOME=" + configHome}, "profiles").CombinedOutput()
+	if exit := (*exec.ExitError)(nil); errors.As(err, &exit) {
+		return strings.TrimSpace(string(out)), nil
+	}
+	return "", err
 }
 
 var profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)

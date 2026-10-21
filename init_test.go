@@ -26,7 +26,7 @@ echo "$*" >> `+log+`
 case "$1" in
 profiles)
 	for f in "$XDG_CONFIG_HOME"/process/profiles/*.md; do
-		if grep -q 'channels = \[[^]]*"[^#"]' "$f"; then
+		if grep -Eq '^(channels|watchlist) = .*[[,] *"[^#]' "$f"; then
 			printf 'process: profile %s:\n  $.urgency.channels[0]: does not match ^#\n' "$f"
 			exit 1
 		fi
@@ -193,5 +193,52 @@ func TestASecondInitRemembersTheCheckoutSkipsTheInstallAndAddsAProfile(t *testin
 	got := profile(t, filepath.Join(i.home, ".config/process/profiles/gadgets.md"))
 	if got["name"] != "gadgets" || !reflect.DeepEqual(got["sources"], []any{"github", "linear"}) || got["slack"] != nil || got["google"] != nil {
 		t.Errorf("gadgets profile = %#v", got)
+	}
+}
+
+func TestAnAnswerProcessRefusesShowsItsErrorAndAsksAgain(t *testing.T) {
+	i, out := setupInit(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	checkout, _ := fakeCheckout(t)
+	lines := widgets(checkout)
+	lines[15] = "incidents" // urgency channels, without the #
+	lines = append(lines[:len(lines)-1],
+		"", "0", "", "", "", "", "", "", "", "", "", "", "", // the same answers again, but for
+		"#incidents", // the urgency channels
+		"",
+		"n",
+	)
+	answer(i, lines...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "$.urgency.channels[0]: does not match ^#") {
+		t.Errorf("did not show process profiles' error:\n%s", out)
+	}
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	want := map[string]any{"people": []any{"Mo", "mo-acme"}, "channels": []any{"#incidents"}, "labels": []any{"deploy-blocking"}}
+	if !reflect.DeepEqual(got["urgency"], want) {
+		t.Errorf("urgency = %#v, want %#v", got["urgency"], want)
+	}
+	if scratch, _ := os.ReadDir(os.Getenv("TMPDIR")); len(scratch) > 0 {
+		t.Errorf("left %v behind in TMPDIR", scratch)
+	}
+}
+
+func TestStoppingAfterARefusedAnswerLeavesNoProfile(t *testing.T) {
+	i, out := setupInit(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	checkout, _ := fakeCheckout(t)
+	lines := widgets(checkout)
+	lines[15] = "incidents"
+	answer(i, lines[:len(lines)-1]...)
+	if err := i.init(); err == nil {
+		t.Fatalf("want init to stop when the answers run out\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(i.home, ".config/process/profiles/widgets.md")); !os.IsNotExist(err) {
+		t.Errorf("an invalid profile is on disk: %v", err)
+	}
+	if scratch, _ := os.ReadDir(os.Getenv("TMPDIR")); len(scratch) > 0 {
+		t.Errorf("left %v behind in TMPDIR", scratch)
 	}
 }
