@@ -1,0 +1,144 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/BurntSushi/toml"
+)
+
+// fakeCheckout is a claude-skills checkout holding every process skill and a process CLI that records each call in
+// log. Its `profiles` refuses a profile with a channel that lacks its #, as the real one does; its `run` writes a
+// brief to the state directory it was given.
+func fakeCheckout(t *testing.T) (dir, log string) {
+	t.Helper()
+	dir, log = t.TempDir(), filepath.Join(t.TempDir(), "process.log")
+	for _, skill := range []string{"brief", "execute", "next-work", "triage", "sweep-github", "sweep-slack", "afk"} {
+		write(dir, skill+"/SKILL.md", "# "+skill+"\n")
+	}
+	write(dir, "process/process.py", `#!/bin/sh
+echo "$*" >> `+log+`
+case "$1" in
+profiles)
+	for f in "$XDG_CONFIG_HOME"/process/profiles/*.md; do
+		if grep -q 'channels = \[[^]]*"[^#"]' "$f"; then
+			printf 'process: profile %s:\n  $.urgency.channels[0]: does not match ^#\n' "$f"
+			exit 1
+		fi
+	done
+	echo "profiles ok";;
+run)
+	echo "state $XDG_STATE_HOME" >> `+log+`
+	mkdir -p "$XDG_STATE_HOME/process"
+	echo "# The dry-run brief" > "$XDG_STATE_HOME/process/brief.md";;
+esac
+`)
+	if err := os.Chmod(filepath.Join(dir, "process/process.py"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir, log
+}
+
+// setupInit is `proc init` over a scratch home, answering from the lines given to answer and opening no editor.
+func setupInit(t *testing.T) (*initializer, *bytes.Buffer) {
+	t.Helper()
+	home := t.TempDir()
+	out := &bytes.Buffer{}
+	return &initializer{
+		home:       home,
+		configHome: filepath.Join(home, ".config"),
+		path:       filepath.Join(home, ".local/bin") + ":/usr/bin:/bin",
+		out:        out,
+		accessible: true,
+		editor:     func(string) error { return nil },
+		now:        func() time.Time { return now },
+		zone:       "America/Chicago",
+	}, out
+}
+
+func answer(i *initializer, lines ...string) {
+	i.in = strings.NewReader(strings.Join(lines, "\n") + "\n")
+}
+
+// widgets answers every question for a profile named widgets on all six sources, and declines the dry run.
+func widgets(checkout string) []string {
+	return []string{
+		checkout,
+		"widgets", "", "0", // name, workdir (~/code/widgets), sources (all six; 0 confirms)
+		"acme/widgets", "WID", "acme", "#incidents, #deploys", "me@acme.example", "mo@acme.example", "",
+		"widgets", "#widgets", "@acme.example", // match
+		"Mo, mo-acme", "#incidents, #incident-*", "deploy-blocking", // urgency
+		"n", // no dry run
+	}
+}
+
+func profile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	parts := strings.SplitN(text, "+++\n", 3)
+	if len(parts) != 3 {
+		t.Fatalf("%s has no +++ front matter:\n%s", path, text)
+	}
+	var p map[string]any
+	if _, err := toml.Decode(parts[1], &p); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return p
+}
+
+func TestInitOnAFreshHomeLinksTheSkillsInstallsProcessAndWritesTheProfile(t *testing.T) {
+	i, out := setupInit(t)
+	checkout, _ := fakeCheckout(t)
+	answer(i, widgets(checkout)...)
+	if err := i.init(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	for _, skill := range []string{"brief", "execute", "next-work", "process", "triage", "sweep-github", "sweep-slack"} {
+		link := filepath.Join(i.home, ".claude/skills", skill)
+		if target, err := os.Readlink(link); err != nil || target != filepath.Join(checkout, skill) {
+			t.Errorf("%s -> %q (%v), want a link to the checkout's %s", link, target, err, skill)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(i.home, ".claude/skills/afk")); !os.IsNotExist(err) {
+		t.Errorf("linked afk, which is not a process skill: %v", err)
+	}
+	process := filepath.Join(i.home, ".local/bin/process")
+	if resolved, err := filepath.EvalSymlinks(process); err != nil || resolved != filepath.Join(checkout, "process/process.py") {
+		t.Errorf("%s resolves to %q (%v), want the checkout's process.py", process, resolved, err)
+	}
+
+	got := profile(t, filepath.Join(i.home, ".config/process/profiles/widgets.md"))
+	want := map[string]any{
+		"name": "widgets", "active": true, "workdir": "~/code/widgets", "timezone": "America/Chicago",
+		"sources": []any{"github", "linear", "slack", "gmail", "calendar", "meetings"},
+		"github":  map[string]any{"repo": "acme/widgets", "review_skill": "/review"},
+		"linear":  map[string]any{"team": "WID"},
+		"slack":   map[string]any{"workspace": "acme", "watchlist": []any{"#incidents", "#deploys"}},
+		"google":  map[string]any{"account": "me@acme.example", "manager": "mo@acme.example", "noise_label": "Noise"},
+		"match":   map[string]any{"keywords": []any{"widgets"}, "channels": []any{"#widgets"}, "senders": []any{"@acme.example"}},
+		"urgency": map[string]any{"people": []any{"Mo", "mo-acme"}, "channels": []any{"#incidents", "#incident-*"}, "labels": []any{"deploy-blocking"}},
+	}
+	for key, value := range want {
+		if !reflect.DeepEqual(got[key], value) {
+			t.Errorf("%s = %#v, want %#v", key, got[key], value)
+		}
+	}
+	if text := read(t, i.home, ".config/process/profiles/widgets.md"); strings.Contains(text, "An example profile") {
+		t.Errorf("the profile still calls itself the example:\n%s", text)
+	}
+	example := profile(t, "profiles/acme.md")
+	for _, key := range []string{"phases", "autonomy", "afk"} {
+		if !reflect.DeepEqual(got[key], example[key]) {
+			t.Errorf("%s differs from the example profile's:\n got %#v\nwant %#v", key, got[key], example[key])
+		}
+	}
+}
