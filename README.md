@@ -22,7 +22,7 @@ proc install      # then: run it unattended (see below)
 4. **Offers a dry run.** `process run --fixtures` of the new profile on claude-skills' fixtures, in a scratch `XDG_STATE_HOME` that it removes afterwards. It shows the brief first. No service is called, but each phase runs as headless Claude.
 5. **Says what's next.** These are the live-run prerequisites proc cannot set up (Gmail's modify scope, the noise label, the Linear MCP server in the workdir's `.mcp.json`), then `proc install`.
 
-The questions are [huh](https://github.com/charmbracelet/huh) forms. With `ACCESSIBLE` set, or answers piped in, they are plain prompts that read one answer per line. With piped answers there is no terminal for `$EDITOR`, so the profile is written without the final look, and `proc init` says where it is. Before asking anything, `proc init` checks that the checkout's `process` accepts proc's copy of the example profile. If it does not, pull the checkout or update proc.
+The questions are [huh](https://github.com/charmbracelet/huh) forms. In the checkout and workdir questions, tab completes the directory being typed, and up and down choose among the matches. With `ACCESSIBLE` set, or answers piped in, they are plain prompts that read one answer per line. With piped answers there is no terminal for `$EDITOR`, so the profile is written without the final look, and `proc init` says where it is. Before asking anything, `proc init` checks that the checkout's `process` accepts proc's copy of the example profile. If it does not, pull the checkout or update proc.
 
 The example profile is claude-skills' `process/profiles/acme.md`, vendored unchanged as `profiles/acme.md`. When it changes there, copy it over.
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/x/term"
 )
@@ -140,10 +142,10 @@ func (i *initializer) checkout() (string, error) {
 		}
 	}
 	var dir string
-	field := huh.NewInput().Title("Where is your claude-skills checkout?").Value(&dir).Validate(func(s string) error {
+	field := i.pathInput("Where is your claude-skills checkout?", &dir).Validate(func(s string) error {
 		return isCheckout(i.expand(s))
 	})
-	if err := i.ask(huh.NewGroup(field)); err != nil {
+	if err := i.askPaths(huh.NewGroup(field)); err != nil {
 		return "", err
 	}
 	dir, err := filepath.Abs(i.expand(dir))
@@ -273,8 +275,8 @@ func (i *initializer) createProfile() (answers, error) {
 	defer os.RemoveAll(scratch)
 	draft := filepath.Join(scratch, "process", "profiles", a.name+".md")
 	for {
-		if err := i.ask(huh.NewGroup(
-			huh.NewInput().Title("Workdir: headless phases run here, so its .mcp.json servers load").Value(&a.workdir),
+		if err := i.askPaths(huh.NewGroup(
+			i.pathInput("Workdir: headless phases run here, so its .mcp.json servers load", &a.workdir),
 			huh.NewMultiSelect[string]().Title("Sources").Options(huh.NewOptions(sources...)...).Value(&a.sources),
 		)); err != nil {
 			return a, err
@@ -459,11 +461,27 @@ func usesGoogle(sources []string) bool {
 }
 
 // ask runs one form: the TUI, or plain prompts when accessible.
-func (i *initializer) ask(groups ...*huh.Group) error {
+func (i *initializer) ask(groups ...*huh.Group) error { return i.run(i.form(false, groups...)) }
+
+// askPaths runs a form holding pathInputs, where tab completes the path.
+func (i *initializer) askPaths(groups ...*huh.Group) error { return i.run(i.form(true, groups...)) }
+
+func (i *initializer) form(paths bool, groups ...*huh.Group) *huh.Form {
 	form := huh.NewForm(groups...).WithAccessible(i.accessible)
+	if paths {
+		// Tab completes a path, as in a shell; enter alone moves on.
+		keys := huh.NewDefaultKeyMap()
+		keys.Input.AcceptSuggestion = key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "complete"))
+		keys.Input.Next = key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "next"))
+		form = form.WithKeyMap(keys)
+	}
 	if i.accessible {
 		form = form.WithInput(i.in).WithOutput(i.out)
 	}
+	return form
+}
+
+func (i *initializer) run(form *huh.Form) error {
 	if err := form.Run(); err != nil {
 		return err
 	}
@@ -471,6 +489,35 @@ func (i *initializer) ask(groups ...*huh.Group) error {
 		return errors.New("ran out of answers")
 	}
 	return nil
+}
+
+// pathInput asks for a directory, suggesting the directories that complete what I have typed so far.
+func (i *initializer) pathInput(title string, value *string) *huh.Input {
+	return huh.NewInput().Title(title).Value(value).SuggestionsFunc(func() []string { return i.subdirs(*value) }, value)
+}
+
+// subdirs are the directories whose paths start with typed, written the way I typed it (~ and all).
+func (i *initializer) subdirs(typed string) []string {
+	if typed == "~" {
+		return []string{"~/"}
+	}
+	cut := strings.LastIndex(typed, "/") + 1
+	parent, prefix := typed[:cut], typed[cut:]
+	entries, err := os.ReadDir(cmp.Or(i.expand(parent), "."))
+	if err != nil {
+		return nil
+	}
+	var dirs []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) || strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(i.expand(parent), name)); err == nil && info.IsDir() { // links too
+			dirs = append(dirs, parent+name+"/")
+		}
+	}
+	return dirs
 }
 
 func (i *initializer) expand(file string) string {

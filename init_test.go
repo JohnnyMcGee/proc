@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 )
 
 // fakeCheckout is a claude-skills checkout holding every process skill and a process CLI that records each call in
@@ -517,5 +519,67 @@ exit 0
 	}
 	if !strings.Contains(out.String(), "fewer than 1 items") {
 		t.Errorf("did not show process' error for no sources:\n%s", out)
+	}
+}
+
+// settle feeds a form the messages its commands produce, as bubbletea would, dropping any that take more than a
+// moment: the cursor's blink ticks forever.
+func settle(m tea.Model, cmd tea.Cmd) tea.Model {
+	if cmd == nil {
+		return m
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(50 * time.Millisecond):
+		return m
+	}
+	switch msg := msg.(type) {
+	case nil, tea.QuitMsg:
+	case tea.BatchMsg:
+		for _, c := range msg {
+			m = settle(m, c)
+		}
+	default:
+		m, cmd = m.Update(msg)
+		m = settle(m, cmd)
+	}
+	return m
+}
+
+func keys(m tea.Model, keys ...string) tea.Model {
+	for _, k := range keys {
+		var msg tea.KeyMsg
+		if k == "tab" {
+			msg = tea.KeyMsg{Type: tea.KeyTab}
+		} else {
+			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+		}
+		var cmd tea.Cmd
+		m, cmd = m.Update(msg)
+		m = settle(m, cmd)
+	}
+	return m
+}
+
+func TestTabCompletesTheDirectoryBeingTypedInAPathField(t *testing.T) {
+	i, _ := setupInit(t)
+	write(i.home, "code/claude-skills/README.md", "")
+	write(i.home, "code/proc/README.md", "")
+	write(i.home, "code/claude.txt", "") // a file is never a completion
+	write(i.home, "coffee/beans", "")
+	var dir string
+	form := i.form(true, huh.NewGroup(i.pathInput("Where is your claude-skills checkout?", &dir)))
+	m := settle(form, form.Init())
+	for _, step := range []struct{ typed, want string }{
+		{"~/cod", "~/code/"},
+		{"cl", "~/code/claude-skills/"},
+	} {
+		m = keys(m, append(strings.Split(step.typed, ""), "tab")...)
+		if dir != step.want {
+			t.Fatalf("typed %q then tab: %q, want %q", step.typed, dir, step.want)
+		}
 	}
 }
