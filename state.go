@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 )
@@ -183,6 +184,48 @@ func appendDecision(root string, d Decision) error {
 		return err
 	}
 	return f.Close()
+}
+
+// replaceDecision puts a changed decision in place of the entry's earlier one, so the file keeps one decision per
+// entry whichever line a reader takes. Only proc writes the file; the new one is renamed over it, so a reader sees
+// the old file or the new one, never half of it.
+func replaceDecision(root string, d Decision) error {
+	if err := validate("decision", d); err != nil {
+		return err
+	}
+	path := filepath.Join(root, "decisions.jsonl")
+	var decisions []Decision
+	if err := readJSONL(path, &decisions); err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	for _, kept := range append(slices.DeleteFunc(decisions, func(old Decision) bool { return old.EntryID == d.EntryID }), d) {
+		line, err := json.Marshal(kept)
+		if err != nil {
+			return err
+		}
+		buf.Write(append(line, '\n'))
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// resultFor is the executor's result for an entry, read now: a sweep's executor may have acted since proc started.
+func resultFor(root, id string) (*Result, error) {
+	var results []Result
+	if err := readJSONL(filepath.Join(root, "results.jsonl"), &results); err != nil {
+		return nil, err
+	}
+	var found *Result
+	for i := range results {
+		if results[i].EntryID == id {
+			found = &results[i]
+		}
+	}
+	return found, nil
 }
 
 func readJSONL[T any](path string, out *[]T) error {

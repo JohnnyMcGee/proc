@@ -252,12 +252,62 @@ func TestQueueIsListedByProjectThenUrgencyWithoutFYIOrSupersededEntries(t *testi
 	}
 }
 
-func TestADecidedEntryCannotBeDecidedAgain(t *testing.T) {
+func TestADecisionFromAnEarlierSessionCannotBeChanged(t *testing.T) {
 	root := fixtureState(t)
-	press(t, start(t, root), "a", "s", "enter", "p")
 	press(t, start(t, root), "a")
+	press(t, start(t, root), "s", "enter", "p")
 
-	only(t, root)
+	assertDecision(t, only(t, root), map[string]any{"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve", "at": "2026-10-20T09:30:00Z"})
+}
+
+func TestIChangeMyMindAsOftenAsIWantWhileProcIsOpen(t *testing.T) {
+	root := fixtureState(t)
+	m := press(t, start(t, root), "a", "s", "not mine", "enter", "p", "s", "Lee owns it", "enter")
+
+	assertDecision(t, only(t, root), map[string]any{
+		"entry_id": "q-aaaaaaaaaaa2", "verdict": "skip", "reason": "Lee owns it", "at": "2026-10-20T09:30:00Z",
+	})
+	if view := m.View(); !strings.Contains(view, "changed to skip") {
+		t.Errorf("the status does not say the decision changed:\n%s", view)
+	}
+
+	press(t, m, "a")
+	assertDecision(t, only(t, root), map[string]any{"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve", "at": "2026-10-20T09:30:00Z"})
+}
+
+func TestChangingOneDecisionKeepsTheOthers(t *testing.T) {
+	root := fixtureState(t)
+	press(t, start(t, root), "a", "j", "a", "k", "s", "enter")
+
+	ds := decisions(t, root)
+	if len(ds) != 2 {
+		t.Fatalf("want 2 decisions, got %v", ds)
+	}
+	assertDecision(t, ds[0], map[string]any{"entry_id": "q-aaaaaaaaaaa1", "verdict": "approve", "at": "2026-10-20T09:30:00Z"})
+	assertDecision(t, ds[1], map[string]any{"entry_id": "q-aaaaaaaaaaa2", "verdict": "skip", "at": "2026-10-20T09:30:00Z"})
+}
+
+func TestADecisionTheExecutorActedOnCannotBeChanged(t *testing.T) {
+	root := fixtureState(t)
+	m := press(t, start(t, root), "a")
+	appendTo(t, filepath.Join(root, "results.jsonl"), `{"entry_id": "q-aaaaaaaaaaa2", "outcome": "success", "at": "2026-10-20T09:31:00Z"}`+"\n")
+	view := press(t, m, "s", "enter").View()
+
+	assertDecision(t, only(t, root), map[string]any{"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve", "at": "2026-10-20T09:30:00Z"})
+	if !strings.Contains(view, "the executor already acted on it") || !strings.Contains(view, "✓ done") {
+		t.Errorf("the view does not say the executor acted:\n%s", view)
+	}
+}
+
+func TestEditingAgainStartsFromMyEarlierEdit(t *testing.T) {
+	root := fixtureState(t)
+	editor(t, `sed 's/per request/per request on purpose/' "$1" > "$1.new" && mv "$1.new" "$1"`)
+	press(t, start(t, root), "e", "enter", "e", "enter")
+
+	assertDecision(t, only(t, root), map[string]any{
+		"entry_id": "q-aaaaaaaaaaa2", "verdict": "approve",
+		"draft": "It is per request on purpose on purpose so a stale entry cannot outlive a deploy.", "at": "2026-10-20T09:30:00Z",
+	})
 }
 
 func TestViewingAnEntryShowsItsContextAndDraft(t *testing.T) {

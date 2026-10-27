@@ -41,7 +41,7 @@ The example profile is claude-skills' `process/profiles/acme.md`, vendored uncha
 | `q` | quit, starting the executor in the background if there is work for it |
 | `ctrl+c` | quit without starting the executor; your decisions stay saved for its next run |
 
-A decision is final: an entry you decided, or one triage approved silently, is the executor's.
+Until you quit, you can change a decision as often as you like: press another key on the entry and the new decision replaces the old one. Once you quit, or once the executor acts on it (a timed sweep runs the executor too), the decision is final. An entry triage approved silently belongs to the executor from the start.
 
 ## Running without me
 
@@ -61,7 +61,7 @@ proc uninstall    # removes both; safe to run twice
 Apart from what `proc init` and `proc install` put in place, proc reads and writes only `$XDG_STATE_HOME/process/` (default `~/.local/state/process/`), which claude-skills' process pipeline owns. It holds no credentials and calls no service API: `proc sweep` leaves that to `process run`.
 
 - reads `queue.jsonl` (triage's queue entries; the last line per id wins), `profiles/<project>/items.jsonl` (the context of each entry's items) and `results.jsonl` (the executor's outcome per entry);
-- appends `decisions.jsonl`, one decision per entry, each validated against the shared schema first;
+- appends `decisions.jsonl`, one decision per entry, each validated against the shared schema first; a decision changed before quitting replaces its line, by writing the file anew and renaming it over the old one;
 - writes a draft under `proc/` while `$EDITOR` has it open, and the executor's output to `executor.log`;
 - `proc sweep` restores `profiles/<project>/watermarks.json` after a failed run, writes run logs under `proc/runs/` and adds a line to `brief.md` when a run fails; `proc notify` records what it sent in `proc/notified.jsonl`.
 

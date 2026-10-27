@@ -29,8 +29,8 @@ type model struct {
 	itemsErr    error // the open entry's items, read when it opened
 	width       int
 	height      int
-	decided     bool   // a decision was recorded this session
-	executorLog string // where the executor started on quit writes; empty when it did not start
+	decided     map[string]bool // entries decided this session: they can be decided again until proc quits
+	executorLog string          // where the executor started on quit writes; empty when it did not start
 	executorErr error
 }
 
@@ -47,7 +47,7 @@ func newModel(root string, now func() time.Time) (*model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &model{root: root, now: now, exec: tea.ExecProcess, rows: rows}, nil
+	return &model{root: root, now: now, exec: tea.ExecProcess, rows: rows, decided: map[string]bool{}}, nil
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -117,7 +117,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // quit starts the executor when it has work: decisions from this session (a skip's reason is a lesson to learn),
 // or an approved entry still without a result.
 func (m *model) quit() {
-	work := m.decided
+	work := len(m.decided) > 0
 	for _, row := range m.rows {
 		approved := row.Status == "approved" || row.Decision != nil && row.Decision.Verdict == "approve"
 		work = work || approved && row.Result == nil
@@ -141,7 +141,7 @@ func (m *model) promote() {
 	m.decide(Decision{Verdict: "approve", PromoteToSilent: true})
 }
 
-// edit opens the draft in $EDITOR. The file lives in the state directory, the only place proc writes, and stays
+// edit opens the draft in $EDITOR, my earlier edit if I made one this session. The file lives in the state directory, the only place proc writes, and stays
 // there until the edit is recorded or dropped, so an edit left at the reason prompt reopens as I left it.
 func (m *model) edit() tea.Cmd {
 	row := m.undecided()
@@ -154,7 +154,7 @@ func (m *model) edit() tea.Cmd {
 		return nil
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err := os.WriteFile(path, []byte(row.Action.Draft+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(draftOf(*row)+"\n"), 0o644); err != nil {
 			m.status = err.Error()
 			return nil
 		}
@@ -188,11 +188,14 @@ func (m *model) afterEdit(msg edited) {
 		m.status = "editor failed, nothing recorded: " + msg.err.Error()
 	case err != nil:
 		m.status = err.Error()
-	case draft == strings.TrimRight(row.Action.Draft, "\n"):
+	case draft == strings.TrimRight(draftOf(*row), "\n"):
 		m.status = "draft unchanged, nothing recorded"
 	case strings.TrimSpace(draft) == "":
 		m.status = "draft emptied, nothing recorded; s skips the entry"
 	default:
+		if draft == strings.TrimRight(row.Action.Draft, "\n") { // edited back to triage's draft
+			draft = ""
+		}
 		m.ask("approve edited draft, reason (optional)", "nothing recorded; e reopens your edit", func(reason string) {
 			m.decide(Decision{Verdict: "approve", Draft: draft, Reason: reason})
 		})
@@ -231,34 +234,52 @@ func (m *model) typeKey(key tea.KeyMsg) {
 	}
 }
 
-// decide records a decision for the row under the cursor.
+// decide records a decision for the row under the cursor, or changes the one made for it this session.
 func (m *model) decide(d Decision) {
 	row := m.undecided()
 	if row == nil {
 		return
 	}
 	d.EntryID, d.At = row.ID, stamp(m.now())
-	if err := appendDecision(m.root, d); err != nil {
+	record, verb := appendDecision, ""
+	if row.Decision != nil {
+		record, verb = replaceDecision, "changed to "
+	}
+	if err := record(m.root, d); err != nil {
 		m.status = "could not record the decision: " + err.Error()
 		return
 	}
 	row.Decision = &d
-	m.decided = true
+	m.decided[row.ID] = true
 	os.Remove(m.draftPath(row.ID)) // an edit left at the reason prompt is moot now
-	m.status = fmt.Sprintf("%s: %s", d.Verdict, row.Summary)
+	m.status = fmt.Sprintf("%s%s: %s", verb, d.Verdict, row.Summary)
 }
 
-// undecided is the row under the cursor if it still waits on a decision. A decided entry, or one triage approved
+// undecided is the row under the cursor if it can still be decided: it waits on a decision, or I decided it this
+// session and the executor has not acted on it yet. A decision from an earlier session, or an entry triage approved
 // silently, is the executor's.
 func (m *model) undecided() *Row {
 	row := m.current()
 	switch {
-	case row != nil && row.Decision != nil:
+	case row == nil:
+		return nil
+	case row.Decision != nil && !m.decided[row.ID]:
 		m.status = "already decided"
 		return nil
-	case row != nil && row.Status == "approved":
+	case row.Status == "approved" && row.Decision == nil:
 		m.status = "already approved silently, waiting on the executor"
 		return nil
+	case row.Decision != nil:
+		result, err := resultFor(m.root, row.ID)
+		if err != nil {
+			m.status = err.Error()
+			return nil
+		}
+		if result != nil {
+			row.Result = result
+			m.status = "the executor already acted on it"
+			return nil
+		}
 	}
 	return row
 }
@@ -423,11 +444,7 @@ func (m *model) entryView(row Row) []line {
 		{},
 		text(seg{"Action: ", bold}, seg{row.Action.Type, styleAction}, seg{params(row.Action.Params), faint}),
 	}
-	draft := row.Action.Draft
-	if row.Decision != nil && row.Decision.Draft != "" {
-		draft = row.Decision.Draft
-	}
-	if draft != "" {
+	if draft := draftOf(row); draft != "" {
 		lines = append(append(lines, line{}, text(seg{"Draft:", bold})), indent(draft)...)
 	}
 	if m.itemsErr != nil {
@@ -438,6 +455,14 @@ func (m *model) entryView(row Row) []line {
 		lines = append(lines, indent(item.Context)...)
 	}
 	return lines
+}
+
+// draftOf is the text the action will send: my edit if I made one, otherwise triage's draft.
+func draftOf(row Row) string {
+	if row.Decision != nil && row.Decision.Draft != "" {
+		return row.Decision.Draft
+	}
+	return row.Action.Draft
 }
 
 // state is where an entry stands: waiting on me, on the executor, or done.
