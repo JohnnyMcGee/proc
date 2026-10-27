@@ -2,6 +2,7 @@
 base = "main"
 bootstrap = ["test ! -f go.mod || go mod download"]
 default_type = "go"
+reviewers = ["NO_COLOR=1 coderabbit review --committed --base {{target}}"]
 
 [task_types.go]
 model = "opus"
@@ -28,6 +29,10 @@ Run `/pre-pr` in the prepr phase, and again after any merge from `main`. It runs
 None. What parallel workers could collide on is the state directory (queue, decisions, ledger, profiles). Point proc at a per-slot directory during verification, `/tmp/afk-state-$AFK_SLOT`, seeded from fixtures, and never at the real `~/.local/state`.
 
 Set `XDG_STATE_HOME` **on the command only**, never `export` it in your shell: `afk report` reads the same variable to find this worker's status, so an exported override hides your reports from the watcher. Remove the directory when you are done: `rm -rf /tmp/afk-state-$AFK_SLOT`.
+
+## Reviewers
+
+Critique runs CodeRabbit over the branch's diff. CodeRabbit keeps a local checkpoint per worktree and branch, so a later round prints only new findings and points at `coderabbit review findings` for the earlier ones. Its `file:line` comes wrapped in a terminal-hyperlink escape; ignore it. Each run counts against the account's included reviews.
 
 ## Verification recipes
 
