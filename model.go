@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type model struct {
@@ -25,6 +27,7 @@ type model struct {
 	scroll      int  // first line of the entry view on screen
 	items       []Item
 	itemsErr    error // the open entry's items, read when it opened
+	width       int
 	height      int
 	decided     bool   // a decision was recorded this session
 	executorLog string // where the executor started on quit writes; empty when it did not start
@@ -61,7 +64,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.afterEdit(msg)
 		return m, nil
 	case tea.WindowSizeMsg:
-		m.height = msg.Height
+		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	}
 	key, ok := msg.(tea.KeyMsg)
@@ -267,100 +270,185 @@ func (m *model) current() *Row {
 	return &m.rows[m.cursor]
 }
 
-// View renders the list or the open entry, cut to the terminal's height. Everything in it that came from a service
-// is untrusted, so control characters are dropped before it reaches the terminal.
+// View renders the list or the open entry, wrapped to the terminal's width and cut to its height. Everything in it
+// that came from a service is untrusted, so control characters are dropped from each piece of text before it is
+// styled and reaches the terminal.
 func (m *model) View() string {
-	footer := []string{"", m.status, "a approve · e edit · s skip · p approve and make silent · enter open · esc back · q quit"}
+	status := line{body: []seg{{m.status, styleStatus}}}
 	if m.prompt != nil {
-		footer[1] = fmt.Sprintf("%s: %s_", m.prompt.label, string(m.prompt.text))
+		status = line{body: []seg{{m.prompt.label + ": ", stylePrompt}, {string(m.prompt.text) + "_", plain}}}
 	}
+	footer := m.wrap([]line{{}, status, help()})
 	room := m.height - len(footer)
 	var lines []string
 	if m.open {
-		lines = m.entryView(*m.current())
+		lines = m.wrap(m.entryView(*m.current()))
 		if room > 0 {
 			m.scroll = min(m.scroll, max(len(lines)-room, 0))
 		}
 	} else {
-		var cursorLine int
-		lines, cursorLine = m.listView()
-		if room > 0 {
-			m.scroll = max(cursorLine-room+1, 0)
+		list, cursorLine := m.listView()
+		for i, l := range list {
+			lines = append(lines, m.wrap([]line{l})...)
+			if i == cursorLine && room > 0 {
+				m.scroll = max(len(lines)-room, 0)
+			}
 		}
 	}
 	if room > 0 {
 		lines = lines[m.scroll:min(len(lines), m.scroll+room)]
 	}
-	return strings.Map(printable, strings.Join(append(lines, footer...), "\n"))
+	return strings.Join(append(lines, footer...), "\n")
+}
+
+var (
+	plain         = lipgloss.NewStyle()
+	faint         = lipgloss.NewStyle().Faint(true)
+	bold          = lipgloss.NewStyle().Bold(true)
+	styleProject  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	styleCursor   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	styleUrgent   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
+	styleAction   = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	styleLink     = lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color("4"))
+	styleActor    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	styleStatus   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	stylePrompt   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	stylePending  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	styleDone     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	styleFailed   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	styleApproved = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+)
+
+// seg is a run of text in one style.
+type seg struct {
+	text  string
+	style lipgloss.Style
+}
+
+// line is one line of the view. When it is wider than the terminal its body wraps, and the lines it wraps onto are
+// indented to line up under the body, past the lead.
+type line struct {
+	lead, body []seg
+}
+
+func text(segs ...seg) line { return line{body: segs} }
+
+func (m *model) wrap(lines []line) []string {
+	var out []string
+	for _, l := range lines {
+		lead, body := render(l.lead), render(l.body)
+		hang := ansi.StringWidth(lead)
+		if m.width > hang {
+			body = ansi.Wrap(body, m.width-hang, "")
+		}
+		for i, part := range strings.Split(body, "\n") {
+			if i > 0 {
+				lead = strings.Repeat(" ", hang)
+			}
+			if m.width > hang {
+				part = ansi.Truncate(part, m.width-hang, "") // a wrap can leave the column padding past the edge
+			}
+			out = append(out, lead+part)
+		}
+	}
+	return out
+}
+
+func render(segs []seg) string {
+	var b strings.Builder
+	for _, s := range segs {
+		b.WriteString(s.style.Render(strings.Map(printable, strings.ReplaceAll(s.text, "\t", "    "))))
+	}
+	return b.String()
 }
 
 func printable(r rune) rune {
-	if r == '\n' || r == '\t' || !unicode.IsControl(r) {
+	if r == '\n' || !unicode.IsControl(r) {
 		return r
 	}
 	return -1
 }
 
-// listView is the queue grouped by project, and the line the cursor is on.
-func (m *model) listView() ([]string, int) {
-	if len(m.rows) == 0 {
-		return []string{"Nothing waits on you."}, 0
+func help() line {
+	keys := []string{"a", "approve", "e", "edit", "s", "skip", "p", "approve and make silent", "enter", "open", "esc", "back", "q", "quit"}
+	var segs []seg
+	for i := 0; i < len(keys); i += 2 {
+		if i > 0 {
+			segs = append(segs, seg{" · ", faint})
+		}
+		segs = append(segs, seg{keys[i], bold}, seg{" " + keys[i+1], faint})
 	}
-	var lines []string
+	return text(segs...)
+}
+
+// listView is the queue grouped by project, and the line the cursor is on. A summary is cut to its column so each
+// entry stays one row; enter shows it whole.
+func (m *model) listView() ([]line, int) {
+	if len(m.rows) == 0 {
+		return []line{text(seg{"Nothing waits on you.", faint})}, 0
+	}
+	column := 60
+	if m.width > 0 {
+		column = min(column, max(m.width-40, 20))
+	}
+	var lines []line
 	cursorLine := 0
 	project := ""
 	for i, row := range m.rows {
 		if row.Project != project {
 			project = row.Project
-			lines = append(lines, project)
+			lines = append(lines, text(seg{project, styleProject}))
 		}
-		pointer, urgent := "  ", " "
+		pointer, urgent, summaryStyle := seg{"  ", plain}, seg{"  ", plain}, plain
 		if i == m.cursor {
-			pointer, cursorLine = "> ", len(lines)
+			pointer, cursorLine, summaryStyle = seg{"> ", styleCursor}, len(lines), bold
 		}
 		if row.Urgency == "urgent" {
-			urgent = "!"
+			urgent = seg{"! ", styleUrgent}
 		}
-		summary := strings.ReplaceAll(row.Summary, "\n", " ")
-		lines = append(lines, fmt.Sprintf("%s%s %-60s  %-16s %s", pointer, urgent, summary, row.Action.Type, state(row)))
+		summary := ansi.Truncate(strings.ReplaceAll(row.Summary, "\n", " "), column, "…")
+		summary += strings.Repeat(" ", column-ansi.StringWidth(summary))
+		lines = append(lines, line{lead: []seg{pointer, urgent}, body: []seg{
+			{summary, summaryStyle}, {"  ", plain}, {fmt.Sprintf("%-16s", row.Action.Type), styleAction}, {" ", plain}, state(row),
+		}})
 	}
 	return lines, cursorLine
 }
 
-func (m *model) entryView(row Row) []string {
-	lines := []string{
-		row.Summary,
-		row.Link,
-		fmt.Sprintf("%s · %s · %s · %s", row.Project, row.Urgency, row.Kind, state(row)),
-		"",
-		"Action: " + row.Action.Type + params(row.Action.Params),
+func (m *model) entryView(row Row) []line {
+	lines := []line{
+		text(seg{row.Summary, bold}),
+		text(seg{row.Link, styleLink}),
+		text(seg{fmt.Sprintf("%s · %s · %s · ", row.Project, row.Urgency, row.Kind), faint}, state(row)),
+		{},
+		text(seg{"Action: ", bold}, seg{row.Action.Type, styleAction}, seg{params(row.Action.Params), faint}),
 	}
 	draft := row.Action.Draft
 	if row.Decision != nil && row.Decision.Draft != "" {
 		draft = row.Decision.Draft
 	}
 	if draft != "" {
-		lines = append(append(lines, "", "Draft:"), indent(draft)...)
+		lines = append(append(lines, line{}, text(seg{"Draft:", bold})), indent(draft)...)
 	}
 	if m.itemsErr != nil {
-		lines = append(lines, "", "could not read the items: "+m.itemsErr.Error())
+		lines = append(lines, line{}, text(seg{"could not read the items: " + m.itemsErr.Error(), styleFailed}))
 	}
 	for _, item := range m.items {
-		lines = append(lines, "", fmt.Sprintf("From %s: %s", item.Actor.Name, item.Summary))
+		lines = append(lines, line{}, text(seg{"From ", bold}, seg{item.Actor.Name, styleActor}, seg{": " + item.Summary, bold}))
 		lines = append(lines, indent(item.Context)...)
 	}
 	return lines
 }
 
 // state is where an entry stands: waiting on me, on the executor, or done.
-func state(row Row) string {
+func state(row Row) seg {
 	switch {
 	case row.Result != nil && row.Result.Outcome == "success":
-		return strings.TrimSpace("✓ done " + row.Result.Link)
+		return seg{strings.TrimSpace("✓ done " + row.Result.Link), styleDone}
 	case row.Result != nil:
-		return "✗ failed: " + row.Result.Error
+		return seg{"✗ failed: " + row.Result.Error, styleFailed}
 	case row.Decision != nil && row.Decision.Verdict == "skip":
-		return "skipped"
+		return seg{"skipped", faint}
 	case row.Decision != nil:
 		s := "approved"
 		if row.Decision.Draft != "" {
@@ -369,11 +457,11 @@ func state(row Row) string {
 		if row.Decision.PromoteToSilent {
 			s += ", silent from now on"
 		}
-		return s
+		return seg{s, styleApproved}
 	case row.Status == "approved":
-		return "approved (silent)"
+		return seg{"approved (silent)", styleApproved}
 	}
-	return "pending"
+	return seg{"pending", stylePending}
 }
 
 func params(p map[string]any) string {
@@ -392,10 +480,10 @@ func params(p map[string]any) string {
 	return " (" + strings.Join(parts, ", ") + ")"
 }
 
-func indent(text string) []string {
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	for i, line := range lines {
-		lines[i] = "    " + line
+func indent(text string) []line {
+	var lines []line
+	for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+		lines = append(lines, line{lead: []seg{{"    ", plain}}, body: []seg{{l, plain}}})
 	}
 	return lines
 }

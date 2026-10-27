@@ -11,6 +11,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 var now = time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)
@@ -491,6 +494,7 @@ func TestTheListScrollsToKeepTheCursorOnScreen(t *testing.T) {
 }
 
 func TestControlSequencesFromServicesNeverReachTheTerminal(t *testing.T) {
+	colors(t)
 	root := fixtureState(t)
 	requeue(t, root, "q-aaaaaaaaaaa2", func(e map[string]any) {
 		e["summary"] = "Lee asked\x1b]52;c;ZXZpbA==\x07 why"
@@ -499,10 +503,40 @@ func TestControlSequencesFromServicesNeverReachTheTerminal(t *testing.T) {
 	m := start(t, root)
 
 	for _, view := range []string{m.View(), press(t, m, "enter").View()} {
-		if strings.ContainsAny(view, "\x1b\x07") {
-			t.Errorf("view carries control characters: %q", view)
+		for _, injected := range []string{"\x1b]52", "\x07", "\x1b[2J", "\x1b[H"} {
+			if strings.Contains(view, injected) {
+				t.Errorf("view carries %q from a service: %q", injected, view)
+			}
 		}
 	}
+}
+
+func TestLongLinesWrapToTheTerminalWidth(t *testing.T) {
+	colors(t)
+	root := fixtureState(t)
+	requeue(t, root, "q-aaaaaaaaaaa2", func(e map[string]any) {
+		e["summary"] = strings.Repeat("Lee asked why the cache is per request ", 4)
+		e["action"].(map[string]any)["draft"] = strings.Repeat("Because each request carries its own tenant. ", 6) + "END"
+	})
+	m := deliver(start(t, root), tea.WindowSizeMsg{Width: 40, Height: 100})
+
+	for _, view := range []string{m.View(), press(t, m, "enter").View()} {
+		for _, l := range strings.Split(view, "\n") {
+			if w := ansi.StringWidth(l); w > 40 {
+				t.Errorf("line is %d cells on a 40-cell terminal: %q", w, ansi.Strip(l))
+			}
+		}
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "END") {
+		t.Errorf("the end of the draft was cut instead of wrapped:\n%s", view)
+	}
+}
+
+// colors renders the view in color, as on a terminal, for the rest of the test.
+func colors(t *testing.T) {
+	was := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(was) })
 }
 
 func TestADraftEndingInANewlineLeftAsIsIsUnchanged(t *testing.T) {
