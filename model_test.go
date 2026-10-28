@@ -535,7 +535,7 @@ func TestTheListScrollsToKeepTheCursorOnScreen(t *testing.T) {
 	m := deliver(start(t, root), tea.WindowSizeMsg{Width: 100, Height: 6})
 	view := press(t, m, "j", "j").View()
 
-	if !strings.Contains(view, "> ") || !strings.Contains(view, "ENG-7") {
+	if !strings.Contains(view, "▌") || !strings.Contains(view, "ENG-7") {
 		t.Errorf("the cursor's row is off screen:\n%s", view)
 	}
 	if n := strings.Count(view, "\n") + 1; n > 6 {
@@ -627,5 +627,27 @@ func TestDecidingDropsAnEditLeftAtTheReasonPrompt(t *testing.T) {
 
 	if left, _ := os.ReadDir(filepath.Join(root, "proc")); len(left) != 0 {
 		t.Errorf("draft files left in the state directory: %v", left)
+	}
+}
+
+func TestAWideTerminalShowsTheEntryUnderTheCursorBesideTheList(t *testing.T) {
+	colors(t)
+	root := fixtureState(t)
+	m := deliver(start(t, root), tea.WindowSizeMsg{Width: 140, Height: 30})
+	view := press(t, m, "j").View()
+
+	for _, want := range []string{"ENG-7", "Looks good overall; one question on the backoff cap.", "Uploads now retry three times with exponential backoff"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("wide view lacks %q:\n%s", want, ansi.Strip(view))
+		}
+	}
+	lines := strings.Split(view, "\n")
+	if len(lines) != 30 {
+		t.Errorf("view is %d lines on a 30-line terminal", len(lines))
+	}
+	for _, l := range lines {
+		if w := ansi.StringWidth(l); w > 140 {
+			t.Errorf("line is %d cells on a 140-cell terminal: %q", w, ansi.Strip(l))
+		}
 	}
 }

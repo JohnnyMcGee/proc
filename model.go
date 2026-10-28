@@ -2,17 +2,15 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	zone "github.com/lrstanley/bubblezone"
 )
 
 type model struct {
@@ -25,13 +23,22 @@ type model struct {
 	prompt      *prompt
 	open        bool // showing the entry under the cursor instead of the list
 	scroll      int  // first line of the entry view on screen
+	listTop     int  // first line of the list on screen
 	items       []Item
-	itemsErr    error // the open entry's items, read when it opened
+	itemsErr    error // the items of the entry under the cursor, read when it got there
 	width       int
 	height      int
 	decided     map[string]bool // entries decided this session: they can be decided again until proc quits
 	executorLog string          // where the executor started on quit writes; empty when it did not start
 	executorErr error
+	inflow      []int         // entries triage queued on each of the last seven days, oldest first
+	zones       *zone.Manager // mouse targets; nil without a mouse
+	motion      bool          // animate; without it every spring is at rest, as in tests
+	animating   bool          // a frame is on its way
+	gauge       motion        // the header's progress line, as a fraction of this session's queue
+	stamp       motion        // the verdict just given, sliding onto its row
+	stamped     string        // the entry the stamp is for
+	flash       motion        // the status dot's glow
 }
 
 // prompt is the one-line reason field. Enter submits it (empty is fine), esc abandons the decision.
@@ -47,7 +54,64 @@ func newModel(root string, now func() time.Time) (*model, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &model{root: root, now: now, exec: tea.ExecProcess, rows: rows, decided: map[string]bool{}}, nil
+	entries, err := loadQueue(root)
+	if err != nil {
+		return nil, err
+	}
+	m := &model{root: root, now: now, exec: tea.ExecProcess, rows: rows, decided: map[string]bool{}, inflow: inflow(entries, now())}
+	m.gauge = motion{spring: gaugeSpring, pos: m.progress(), target: m.progress()}
+	m.stamp = motion{spring: stampSpring, pos: 1, target: 1}
+	m.flash = motion{spring: flashSpring}
+	m.load()
+	return m, nil
+}
+
+// inflow counts the entries triage queued on each of the seven days up to today.
+func inflow(entries []Entry, now time.Time) []int {
+	counts := make([]int, 7)
+	y, mo, d := now.Local().Date()
+	today := time.Date(y, mo, d, 0, 0, 0, 0, time.Local)
+	for _, e := range entries {
+		created, err := time.Parse(time.RFC3339, e.Created)
+		if err != nil {
+			continue
+		}
+		y, mo, d := created.Local().Date()
+		ago := int(math.Round(today.Sub(time.Date(y, mo, d, 0, 0, 0, 0, time.Local)).Hours() / 24)) // a DST day is 23 or 25 hours
+		if ago >= 0 && ago < len(counts) {
+			counts[len(counts)-1-ago]++
+		}
+	}
+	return counts
+}
+
+// waiting counts the entries waiting on my decision, and the urgent ones among them.
+func (m *model) waiting() (waiting, urgent int) {
+	for _, row := range m.rows {
+		if row.Decision == nil && row.Status == "pending" {
+			waiting++
+			if row.Urgency == "urgent" {
+				urgent++
+			}
+		}
+	}
+	return waiting, urgent
+}
+
+// progress is how much of this session's queue I have decided.
+func (m *model) progress() float64 {
+	waiting, _ := m.waiting()
+	if waiting+len(m.decided) == 0 {
+		return 1
+	}
+	return float64(len(m.decided)) / float64(waiting+len(m.decided))
+}
+
+// load reads the items of the entry under the cursor, for its context.
+func (m *model) load() {
+	if row := m.current(); row != nil {
+		m.items, m.itemsErr = loadItems(m.root, row.Project, row.ItemIDs)
+	}
 }
 
 func (m *model) Init() tea.Cmd { return nil }
@@ -59,44 +123,59 @@ type edited struct {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(frame); ok {
+		return m, m.stepFrame()
+	}
+	status := m.status
+	cmd := m.handle(msg)
+	if m.status != status {
+		m.flash.from(1, 0)
+	}
+	return m, tea.Batch(cmd, m.animate())
+}
+
+func (m *model) handle(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case edited:
 		m.afterEdit(msg)
-		return m, nil
+		return nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		return m, nil
+		return nil
+	case tea.MouseMsg:
+		return m.click(msg)
 	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
-		return m, nil
+		return nil
 	}
 	if m.prompt != nil {
 		m.typeKey(key)
-		return m, nil
+		return nil
 	}
 	switch key.String() {
 	case "q":
 		m.quit()
-		return m, tea.Quit
+		return tea.Quit
 	case "ctrl+c": // abort: decisions are saved, and the next q starts the executor on them
-		return m, tea.Quit
+		return tea.Quit
 	case "j", "down":
 		if m.open {
 			m.scroll++
 		} else {
 			m.cursor = min(m.cursor+1, max(len(m.rows)-1, 0))
+			m.load()
 		}
 	case "k", "up":
 		if m.open {
 			m.scroll = max(m.scroll-1, 0)
 		} else {
 			m.cursor = max(m.cursor-1, 0)
+			m.load()
 		}
 	case "enter":
-		if row := m.current(); row != nil {
+		if m.current() != nil {
 			m.open, m.scroll = true, 0
-			m.items, m.itemsErr = loadItems(m.root, row.Project, row.ItemIDs)
 		}
 	case "esc":
 		m.open = false
@@ -107,11 +186,53 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.decide(Decision{Verdict: "skip", Reason: reason})
 		})
 	case "e":
-		return m, m.edit()
+		return m.edit()
 	case "p":
 		m.promote()
 	}
-	return m, nil
+	return nil
+}
+
+// click turns the mouse into keys: the wheel moves, a click on a row selects it or opens it when it is selected
+// already, and a click on a key in the footer presses it.
+func (m *model) click(msg tea.MouseMsg) tea.Cmd {
+	switch {
+	case m.prompt == nil && msg.Button == tea.MouseButtonWheelUp:
+		return m.press("k")
+	case m.prompt == nil && msg.Button == tea.MouseButtonWheelDown:
+		return m.press("j")
+	case m.zones == nil || msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionRelease:
+		return nil
+	}
+	for _, h := range m.keys() {
+		if h.key != "" && m.zones.Get("key:"+h.key).InBounds(msg) {
+			return m.press(h.key)
+		}
+	}
+	if m.open || m.prompt != nil {
+		return nil
+	}
+	for i := range m.rows {
+		if m.zones.Get(fmt.Sprintf("row:%d", i)).InBounds(msg) {
+			if i == m.cursor {
+				return m.press("enter")
+			}
+			m.cursor = i
+			m.load()
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *model) press(key string) tea.Cmd {
+	switch key {
+	case "enter":
+		return m.handle(tea.KeyMsg{Type: tea.KeyEnter})
+	case "esc":
+		return m.handle(tea.KeyMsg{Type: tea.KeyEsc})
+	}
+	return m.handle(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
 }
 
 // quit starts the executor when it has work: decisions from this session (a skip's reason is a lesson to learn),
@@ -253,6 +374,11 @@ func (m *model) decide(d Decision) {
 	m.decided[row.ID] = true
 	os.Remove(m.draftPath(row.ID)) // an edit left at the reason prompt is moot now
 	m.status = fmt.Sprintf("%s%s: %s", verb, d.Verdict, row.Summary)
+	if waiting, _ := m.waiting(); waiting == 0 {
+		m.status = fmt.Sprintf("✦ all clear · q hands %d decisions to the executor", len(m.decided))
+	}
+	m.stamped = row.ID
+	m.stamp.from(0, 1)
 }
 
 // undecided is the row under the cursor if it can still be decided: it waits on a decision, or I decided it this
@@ -289,226 +415,4 @@ func (m *model) current() *Row {
 		return nil
 	}
 	return &m.rows[m.cursor]
-}
-
-// View renders the list or the open entry, wrapped to the terminal's width and cut to its height. Everything in it
-// that came from a service is untrusted, so control characters are dropped from each piece of text before it is
-// styled and reaches the terminal.
-func (m *model) View() string {
-	status := line{body: []seg{{m.status, styleStatus}}}
-	if m.prompt != nil {
-		status = line{body: []seg{{m.prompt.label + ": ", stylePrompt}, {string(m.prompt.text) + "_", plain}}}
-	}
-	footer := m.wrap([]line{{}, status, help()})
-	room := m.height - len(footer)
-	var lines []string
-	if m.open {
-		lines = m.wrap(m.entryView(*m.current()))
-		if room > 0 {
-			m.scroll = min(m.scroll, max(len(lines)-room, 0))
-		}
-	} else {
-		list, cursorLine := m.listView()
-		for i, l := range list {
-			lines = append(lines, m.wrap([]line{l})...)
-			if i == cursorLine && room > 0 {
-				m.scroll = max(len(lines)-room, 0)
-			}
-		}
-	}
-	if room > 0 {
-		lines = lines[m.scroll:min(len(lines), m.scroll+room)]
-	}
-	return strings.Join(append(lines, footer...), "\n")
-}
-
-var (
-	plain         = lipgloss.NewStyle()
-	faint         = lipgloss.NewStyle().Faint(true)
-	bold          = lipgloss.NewStyle().Bold(true)
-	styleProject  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
-	styleCursor   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	styleUrgent   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1"))
-	styleAction   = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
-	styleLink     = lipgloss.NewStyle().Underline(true).Foreground(lipgloss.Color("4"))
-	styleActor    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	styleStatus   = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	stylePrompt   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	stylePending  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	styleDone     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	styleFailed   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	styleApproved = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-)
-
-// seg is a run of text in one style.
-type seg struct {
-	text  string
-	style lipgloss.Style
-}
-
-// line is one line of the view. When it is wider than the terminal its body wraps, and the lines it wraps onto are
-// indented to line up under the body, past the lead.
-type line struct {
-	lead, body []seg
-}
-
-func text(segs ...seg) line { return line{body: segs} }
-
-func (m *model) wrap(lines []line) []string {
-	var out []string
-	for _, l := range lines {
-		lead, body := render(l.lead), render(l.body)
-		hang := ansi.StringWidth(lead)
-		if m.width > hang {
-			body = ansi.Wrap(body, m.width-hang, "")
-		}
-		for i, part := range strings.Split(body, "\n") {
-			if i > 0 {
-				lead = strings.Repeat(" ", hang)
-			}
-			if m.width > hang {
-				part = ansi.Truncate(part, m.width-hang, "") // a wrap can leave the column padding past the edge
-			}
-			out = append(out, lead+part)
-		}
-	}
-	return out
-}
-
-func render(segs []seg) string {
-	var b strings.Builder
-	for _, s := range segs {
-		b.WriteString(s.style.Render(strings.Map(printable, strings.ReplaceAll(s.text, "\t", "    "))))
-	}
-	return b.String()
-}
-
-func printable(r rune) rune {
-	if r == '\n' || !unicode.IsControl(r) {
-		return r
-	}
-	return -1
-}
-
-func help() line {
-	keys := []string{"a", "approve", "e", "edit", "s", "skip", "p", "approve and make silent", "enter", "open", "esc", "back", "q", "quit"}
-	var segs []seg
-	for i := 0; i < len(keys); i += 2 {
-		if i > 0 {
-			segs = append(segs, seg{" · ", faint})
-		}
-		segs = append(segs, seg{keys[i], bold}, seg{" " + keys[i+1], faint})
-	}
-	return text(segs...)
-}
-
-// listView is the queue grouped by project, and the line the cursor is on. A summary is cut to its column so each
-// entry stays one row; enter shows it whole.
-func (m *model) listView() ([]line, int) {
-	if len(m.rows) == 0 {
-		return []line{text(seg{"Nothing waits on you.", faint})}, 0
-	}
-	column := 60
-	if m.width > 0 {
-		column = min(column, max(m.width-40, 20))
-	}
-	var lines []line
-	cursorLine := 0
-	project := ""
-	for i, row := range m.rows {
-		if row.Project != project {
-			project = row.Project
-			lines = append(lines, text(seg{project, styleProject}))
-		}
-		pointer, urgent, summaryStyle := seg{"  ", plain}, seg{"  ", plain}, plain
-		if i == m.cursor {
-			pointer, cursorLine, summaryStyle = seg{"> ", styleCursor}, len(lines), bold
-		}
-		if row.Urgency == "urgent" {
-			urgent = seg{"! ", styleUrgent}
-		}
-		summary := ansi.Truncate(strings.ReplaceAll(row.Summary, "\n", " "), column, "…")
-		summary += strings.Repeat(" ", column-ansi.StringWidth(summary))
-		lines = append(lines, line{lead: []seg{pointer, urgent}, body: []seg{
-			{summary, summaryStyle}, {"  ", plain}, {fmt.Sprintf("%-16s", row.Action.Type), styleAction}, {" ", plain}, state(row),
-		}})
-	}
-	return lines, cursorLine
-}
-
-func (m *model) entryView(row Row) []line {
-	lines := []line{
-		text(seg{row.Summary, bold}),
-		text(seg{row.Link, styleLink}),
-		text(seg{fmt.Sprintf("%s · %s · %s · ", row.Project, row.Urgency, row.Kind), faint}, state(row)),
-		{},
-		text(seg{"Action: ", bold}, seg{row.Action.Type, styleAction}, seg{params(row.Action.Params), faint}),
-	}
-	if draft := draftOf(row); draft != "" {
-		lines = append(append(lines, line{}, text(seg{"Draft:", bold})), indent(draft)...)
-	}
-	if m.itemsErr != nil {
-		lines = append(lines, line{}, text(seg{"could not read the items: " + m.itemsErr.Error(), styleFailed}))
-	}
-	for _, item := range m.items {
-		lines = append(lines, line{}, text(seg{"From ", bold}, seg{item.Actor.Name, styleActor}, seg{": " + item.Summary, bold}))
-		lines = append(lines, indent(item.Context)...)
-	}
-	return lines
-}
-
-// draftOf is the text the action will send: my edit if I made one, otherwise triage's draft.
-func draftOf(row Row) string {
-	if row.Decision != nil && row.Decision.Draft != "" {
-		return row.Decision.Draft
-	}
-	return row.Action.Draft
-}
-
-// state is where an entry stands: waiting on me, on the executor, or done.
-func state(row Row) seg {
-	switch {
-	case row.Result != nil && row.Result.Outcome == "success":
-		return seg{strings.TrimSpace("✓ done " + row.Result.Link), styleDone}
-	case row.Result != nil:
-		return seg{"✗ failed: " + row.Result.Error, styleFailed}
-	case row.Decision != nil && row.Decision.Verdict == "skip":
-		return seg{"skipped", faint}
-	case row.Decision != nil:
-		s := "approved"
-		if row.Decision.Draft != "" {
-			s += ", edited"
-		}
-		if row.Decision.PromoteToSilent {
-			s += ", silent from now on"
-		}
-		return seg{s, styleApproved}
-	case row.Status == "approved":
-		return seg{"approved (silent)", styleApproved}
-	}
-	return seg{"pending", stylePending}
-}
-
-func params(p map[string]any) string {
-	if len(p) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(p))
-	for k := range p {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var parts []string
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%v", k, p[k]))
-	}
-	return " (" + strings.Join(parts, ", ") + ")"
-}
-
-func indent(text string) []line {
-	var lines []line
-	for _, l := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		lines = append(lines, line{lead: []seg{{"    ", plain}}, body: []seg{{l, plain}}})
-	}
-	return lines
 }

@@ -28,7 +28,9 @@ The example profile is claude-skills' `process/profiles/acme.md`, vendored uncha
 
 ## Working the queue
 
-`proc` lists the entries waiting on you in the approval queue, grouped by project and then by urgency (`!` is urgent). FYI and superseded entries stay out; entries you decided stay for a week with their result.
+`proc` lists the entries waiting on you in the approval queue, grouped by project and then by urgency (`!` is urgent). FYI and superseded entries stay out; entries you decided stay for a week with their result. On a terminal 110 columns or wider, the entry under the cursor (its draft, action and context) shows beside the list. The header counts what waits, sparks triage's inflow over the last seven days, and fills a line as you decide this session's entries.
+
+The mouse works too: the wheel moves, a click selects an entry and a second click opens it, and a click on a key in the footer presses it. Hold shift to select text the way the terminal usually does.
 
 | Key | Does |
 | --- | --- |

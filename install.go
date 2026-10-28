@@ -57,6 +57,9 @@ func runCommand(name string, args ...string) error {
 // Every sweep is America/Chicago time: the machine and my working day are there.
 const sweepZone = "America/Chicago"
 
+// sweepTimes are when the timers run: a full sweep at the first, delta sweeps at the rest.
+var sweepTimes = []string{"08:00", "12:30", "16:30"}
+
 var timers = []string{"proc-brief.timer", "proc-delta.timer"}
 
 func (i *installer) units() map[string]string {
@@ -80,9 +83,9 @@ func (i *installer) units() map[string]string {
 	}
 	return map[string]string{
 		"proc-brief.service": service("full sweep and brief", ""),
-		"proc-brief.timer":   timer("full sweep and brief every morning", "08:00"),
+		"proc-brief.timer":   timer("full sweep and brief every morning", sweepTimes[0]),
 		"proc-delta.service": service("delta sweep", " --delta"),
-		"proc-delta.timer":   timer("delta sweeps through the day", "12:30", "16:30"),
+		"proc-delta.timer":   timer("delta sweeps through the day", sweepTimes[1:]...),
 	}
 }
 
