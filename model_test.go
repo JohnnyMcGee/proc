@@ -651,3 +651,72 @@ func TestAWideTerminalShowsTheEntryUnderTheCursorBesideTheList(t *testing.T) {
 		}
 	}
 }
+
+func TestNextWorkShowsUnderTheQueue(t *testing.T) {
+	root := fixtureState(t)
+	view := ansi.Strip(deliver(start(t, root), tea.WindowSizeMsg{Width: 100, Height: 100}).View())
+
+	queued, next := strings.Index(view, "Retry flaky uploads"), strings.Index(view, "NEXT WORK · ACME")
+	if queued < 0 || next < queued {
+		t.Fatalf("want next work under the queue:\n%s", view)
+	}
+	for _, want := range []string{"ranked " + time.Date(2026, 10, 20, 8, 10, 0, 0, time.UTC).Local().Format("15:04"), "1 acme/app#15  My PR 15", "My own PR: 1 fix waiting on me", "2 ENG-21  Per-tenant upload quotas", "+ 1 trivial for AFK workers"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view lacks %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestNextWorkShowsWhenNothingWaits(t *testing.T) {
+	root := fixtureState(t)
+	if err := os.WriteFile(filepath.Join(root, "queue.jsonl"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	view := ansi.Strip(start(t, root).View())
+
+	if !strings.Contains(view, "Nothing waits on you.") || !strings.Contains(view, "ENG-21  Per-tenant upload quotas") {
+		t.Errorf("want the all-clear and next work:\n%s", view)
+	}
+}
+
+func TestNextWorkFromAnEarlierDaySaysWhichDay(t *testing.T) {
+	root := fixtureState(t)
+	path := filepath.Join(root, "profiles", "acme", "next.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(data), "2026-10-20T08:10:00Z", "2026-10-17T13:10:00Z", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := "ranked " + strings.ToLower(time.Date(2026, 10, 17, 13, 10, 0, 0, time.UTC).Local().Format("Mon 2 Jan 15:04"))
+	if view := ansi.Strip(start(t, root).View()); !strings.Contains(view, want) {
+		t.Errorf("view lacks %q:\n%s", want, view)
+	}
+}
+
+func TestUnreadableNextWorkStillShowsTheQueue(t *testing.T) {
+	root := fixtureState(t)
+	if err := os.WriteFile(filepath.Join(root, "profiles", "acme", "next.json"), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	view := ansi.Strip(start(t, root).View())
+
+	if !strings.Contains(view, "Retry flaky uploads") || !strings.Contains(view, "could not read next work") {
+		t.Errorf("want the queue and the error:\n%s", view)
+	}
+}
+
+func TestFixtureNextWorkFollowsTheSharedSchema(t *testing.T) {
+	var next map[string]any
+	data, err := os.ReadFile("testdata/state/process/profiles/acme/next.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &next); err != nil {
+		t.Fatal(err)
+	}
+	if err := validate("next_work", next); err != nil {
+		t.Error(err)
+	}
+}

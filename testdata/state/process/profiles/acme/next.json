@@ -1,0 +1,29 @@
+{
+  "profile": "acme",
+  "at": "2026-10-20T08:10:00Z",
+  "recommendations": [
+    {
+      "tier": "pr_fix",
+      "ref": "acme/app#15",
+      "title": "My PR 15 (move uploads onto the job queue so a slow bucket no longer holds the request open) has failing CI",
+      "link": "https://github.com/acme/app/pull/15",
+      "reason": "My own PR: 1 fix waiting on me"
+    },
+    {
+      "tier": "in_progress",
+      "ref": "ENG-21",
+      "title": "Per-tenant upload quotas",
+      "link": "https://linear.app/acme/issue/ENG-21/per-tenant-upload-quotas",
+      "reason": "Already in progress: high priority, opened 12 days ago"
+    }
+  ],
+  "afk": [
+    {
+      "tier": "afk",
+      "ref": "ENG-30",
+      "title": "Fix the typo in the upload error message",
+      "link": "https://linear.app/acme/issue/ENG-30/fix-the-typo",
+      "reason": "Trivial: one string"
+    }
+  ]
+}

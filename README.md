@@ -28,7 +28,7 @@ The example profile is claude-skills' `process/profiles/acme.md`, vendored uncha
 
 ## Working the queue
 
-`proc` lists the entries waiting on you in the approval queue, grouped by project and then by urgency (`!` is urgent). FYI and superseded entries stay out; entries you decided stay for a week with their result. On a terminal 110 columns or wider, the entry under the cursor (its draft, action and context) shows beside the list. The header counts what waits, sparks triage's inflow over the last seven days, and fills a line as you decide this session's entries.
+`proc` lists the entries waiting on you in the approval queue, grouped by project and then by urgency (`!` is urgent). FYI and superseded entries stay out; entries you decided stay for a week with their result. Under the queue, **Next work** shows what claude-skills' next-work ranked for each project on the morning's full sweep (`profiles/<project>/next.json`): up to three tickets or PRs to start, with the reason for each, and how many trivial ones it left for AFK workers. It is there to read; a promotion or an AFK launch that needs approval is a queue entry like any other. On a terminal 110 columns or wider, the entry under the cursor (its draft, action and context) shows beside the list. The header counts what waits, sparks triage's inflow over the last seven days, and fills a line as you decide this session's entries.
 
 The mouse works too: the wheel moves, a click selects an entry and a second click opens it, and a click on a key in the footer presses it. Hold shift to select text the way the terminal usually does.
 
@@ -62,7 +62,7 @@ proc uninstall    # removes both; safe to run twice
 
 Apart from what `proc init` and `proc install` put in place, proc reads and writes only `$XDG_STATE_HOME/process/` (default `~/.local/state/process/`), which claude-skills' process pipeline owns. It holds no credentials and calls no service API: `proc sweep` leaves that to `process run`.
 
-- reads `queue.jsonl` (triage's queue entries; the last line per id wins), `profiles/<project>/items.jsonl` (the context of each entry's items) and `results.jsonl` (the executor's outcome per entry);
+- reads `queue.jsonl` (triage's queue entries; the last line per id wins), `profiles/<project>/items.jsonl` (the context of each entry's items), `profiles/<project>/next.json` (next-work's ranking) and `results.jsonl` (the executor's outcome per entry);
 - appends `decisions.jsonl`, one decision per entry, each validated against the shared schema first; a decision changed before quitting replaces its line, by writing the file anew and renaming it over the old one;
 - writes a draft under `proc/` while `$EDITOR` has it open, and the executor's output to `executor.log`;
 - `proc sweep` restores `profiles/<project>/watermarks.json` after a failed run, writes run logs under `proc/runs/` and adds a line to `brief.md` when a run fails; `proc notify` records what it sent in `proc/notified.jsonl`.

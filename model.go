@@ -32,6 +32,8 @@ type model struct {
 	executorLog string          // where the executor started on quit writes; empty when it did not start
 	executorErr error
 	inflow      []int         // entries triage queued on each of the last seven days, oldest first
+	next        []NextWork    // what next-work ranked for each profile
+	nextErr     error         // why next work could not be read; the queue still shows
 	zones       *zone.Manager // mouse targets; nil without a mouse
 	motion      bool          // animate; without it every spring is at rest, as in tests
 	animating   bool          // a frame is on its way
@@ -59,6 +61,7 @@ func newModel(root string, now func() time.Time) (*model, error) {
 		return nil, err
 	}
 	m := &model{root: root, now: now, exec: tea.ExecProcess, rows: rows, decided: map[string]bool{}, inflow: inflow(entries, now())}
+	m.next, m.nextErr = loadNextWork(root)
 	m.gauge = motion{spring: gaugeSpring, pos: m.progress(), target: m.progress()}
 	m.stamp = motion{spring: stampSpring, pos: 1, target: 1}
 	m.flash = motion{spring: flashSpring}

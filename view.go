@@ -154,7 +154,7 @@ func (m *model) keysLine() string {
 // an entry stands without saying it.
 func (m *model) listPane(width, room int, compact bool) []string {
 	if len(m.rows) == 0 {
-		return m.allClear(width)
+		return append(m.allClear(width), m.nextPane(width)...)
 	}
 	var lines []string
 	top, end := 0, 0
@@ -181,6 +181,7 @@ func (m *model) listPane(width, room int, compact bool) []string {
 		}
 		lines = append(lines, wrapped...)
 	}
+	lines = append(lines, m.nextPane(width)...)
 	if room <= 0 || len(lines) <= room {
 		m.listTop = 0
 		return lines
@@ -272,6 +273,65 @@ func verbOf(action string) string {
 		action = rest
 	}
 	return strings.ReplaceAll(action, "_", " ")
+}
+
+// nextPane is what next-work ranked for me to start on each project, under the queue. It only shows: a promotion or
+// an AFK launch that needs my approval is a queue entry like any other.
+func (m *model) nextPane(width int) []string {
+	var lines []line
+	if m.nextErr != nil {
+		lines = append(lines, line{}, text(seg{"could not read next work: " + m.nextErr.Error(), styleFailed}))
+	}
+	column := 0 // each recommendation stays two rows: the ref and title, then the reason
+	if width > 0 {
+		column = max(width-4, 8)
+	}
+	cut := func(s string) string {
+		s = strings.ReplaceAll(s, "\n", " ")
+		if column == 0 {
+			return s
+		}
+		return ansi.Truncate(s, column, "…")
+	}
+	for _, next := range m.next {
+		if len(next.Recommendations) == 0 && len(next.AFK) == 0 {
+			continue
+		}
+		lines = append(lines, line{}, m.nextHeading(next, width))
+		for i, r := range next.Recommendations {
+			lines = append(lines,
+				line{lead: []seg{{fmt.Sprintf("  %d ", i+1), styleLamp}}, body: []seg{{cut(r.Ref + "  " + r.Title), styleInk}}},
+				line{lead: []seg{{"    ", plain}}, body: []seg{{cut(r.Reason), styleDust}}},
+			)
+		}
+		if n := len(next.AFK); n > 0 {
+			lines = append(lines, line{lead: []seg{{"  + ", styleDust}}, body: []seg{{fmt.Sprintf("%d trivial for AFK workers", n), styleDust}}})
+		}
+	}
+	return m.wrap(lines, width)
+}
+
+// nextHeading names the project and when next-work ranked it: once a day, on the morning's full sweep.
+func (m *model) nextHeading(next NextWork, width int) line {
+	label := "✦ NEXT WORK · " + strings.ToUpper(next.Profile) + " "
+	var note seg
+	if at, err := time.Parse(time.RFC3339, next.At); err == nil {
+		when := at.Local().Format("15:04")
+		if !startOfDay(at).Equal(startOfDay(m.now())) {
+			when = strings.ToLower(at.Local().Format("Mon 2 Jan 15:04"))
+		}
+		note = seg{" ranked " + when, styleDust}
+	}
+	fill := 8
+	if width > 0 {
+		fill = max(width-ansi.StringWidth(label)-ansi.StringWidth(note.text), 1)
+	}
+	return text(seg{label, styleLamp}, seg{strings.Repeat("┄", fill), styleChalk}, note)
+}
+
+func startOfDay(t time.Time) time.Time {
+	y, mo, d := t.Local().Date()
+	return time.Date(y, mo, d, 0, 0, 0, 0, time.Local)
 }
 
 // allClear is the list when nothing is on it.

@@ -166,6 +166,45 @@ func loadItems(root, project string, ids []string) ([]Item, error) {
 	return items, nil
 }
 
+// Recommendation is one thing next-work proposes I start, and why now.
+type Recommendation struct {
+	Tier   string `json:"tier"`
+	Ref    string `json:"ref"`
+	Title  string `json:"title"`
+	Link   string `json:"link"`
+	Reason string `json:"reason"`
+}
+
+// NextWork is a profile's next.json: what next-work ranked on the last full sweep, and the trivial tickets it left
+// for AFK workers.
+type NextWork struct {
+	Profile         string           `json:"profile"`
+	At              string           `json:"at"`
+	Recommendations []Recommendation `json:"recommendations"`
+	AFK             []Recommendation `json:"afk"`
+}
+
+// loadNextWork reads every profile's next.json, by profile name. A profile next-work has not ranked yet has none.
+func loadNextWork(root string) ([]NextWork, error) {
+	paths, err := filepath.Glob(filepath.Join(root, "profiles", "*", "next.json"))
+	if err != nil {
+		return nil, err
+	}
+	var all []NextWork
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var next NextWork
+		if err := json.Unmarshal(data, &next); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		all = append(all, next)
+	}
+	return all, nil
+}
+
 // appendDecision validates a decision against the shared schema before it reaches the decisions file.
 func appendDecision(root string, d Decision) error {
 	if err := validate("decision", d); err != nil {

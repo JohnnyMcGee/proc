@@ -31,7 +31,7 @@ func init() {
 	if err := c.AddResource(schemaURL, doc); err != nil {
 		panic(err)
 	}
-	for _, kind := range []string{"queue_entry", "decision", "result"} {
+	for _, kind := range []string{"queue_entry", "decision", "result", "next_work"} {
 		schemas[kind] = c.MustCompile(schemaURL + "#/$defs/" + kind)
 	}
 	silent := doc
